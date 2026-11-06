@@ -3383,3 +3383,36 @@ func TestManager_SendPlaceholder(t *testing.T) {
 		t.Error("expected SendPlaceholder to fail for unknown channel")
 	}
 }
+
+func TestPreSend_ActivityMessagesLeaveTypingAndPlaceholderAlone(t *testing.T) {
+	for _, kind := range []string{"tool_result", "subturn"} {
+		t.Run(kind, func(t *testing.T) {
+			m := newTestManager()
+			editCalled := false
+			ch := &mockMessageEditor{
+				editFn: func(_ context.Context, _, _, _ string) error {
+					editCalled = true
+					return nil
+				},
+			}
+			typingStopped := false
+			m.RecordTypingStop("test", "123", func() { typingStopped = true })
+			m.RecordPlaceholder("test", "123", "456")
+
+			msg := testOutboundMessage(bus.OutboundMessage{Channel: "test", ChatID: "123"})
+			msg.Context.Raw = map[string]string{"message_kind": kind, kind: `{"x":1}`}
+			if _, handled := m.preSend(context.Background(), "test", msg, ch); handled {
+				t.Fatal("activity message must fall through to Send")
+			}
+			if typingStopped {
+				t.Fatal("activity message stopped the typing indicator")
+			}
+			if editCalled {
+				t.Fatal("activity message consumed the placeholder")
+			}
+			if _, ok := m.placeholders.Load("test:123"); !ok {
+				t.Fatal("placeholder was removed")
+			}
+		})
+	}
+}

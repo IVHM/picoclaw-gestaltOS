@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,6 +179,10 @@ type SubTurnConfig struct {
 	// The target agent's workspace, model, tools, and system prompt are used
 	// instead of the caller's. If empty, the sub-turn runs as the parent agent.
 	TargetAgentID string
+
+	// Label is the human name for the child (the spawn tool's label). Clients
+	// show it on the child's row. Empty falls back to the generated sub-turn id.
+	Label string
 }
 
 // ====================== Context Keys ======================
@@ -236,6 +241,7 @@ func (s *AgentLoopSpawner) SpawnSubTurn(
 		Timeout:            cfg.Timeout,
 		MaxContextRunes:    cfg.MaxContextRunes,
 		TargetAgentID:      cfg.TargetAgentID,
+		Label:              cfg.Label,
 	}
 
 	return spawnSubTurn(ctx, s.al, parentTS, agentCfg)
@@ -442,14 +448,32 @@ func spawnSubTurn(
 	parentTS.mu.Unlock()
 
 	// 6. Emit Spawn event
+	label := strings.TrimSpace(cfg.Label)
+	if label == "" {
+		label = childID
+	}
+	spawnToolCallID := tools.ToolCallID(ctx)
+	spawnedAt := time.Now()
 	al.emitEvent(runtimeevents.KindAgentSubTurnSpawn,
 		childTS.eventMeta("spawnSubTurn", "subturn.spawn"),
 		SubTurnSpawnPayload{
 			AgentID:      childTS.agentID,
-			Label:        childID,
+			Label:        label,
 			ParentTurnID: parentTS.turnID,
+			ChildTurnID:  childID,
+			ToolCallID:   spawnToolCallID,
 		},
 	)
+	al.publishPicoSubTurn(parentTS, PicoSubTurn{
+		Phase:        SubTurnPhaseSpawn,
+		ChildTurnID:  childID,
+		ParentTurnID: parentTS.turnID,
+		AgentID:      childTS.agentID,
+		Label:        label,
+		ToolCallID:   spawnToolCallID,
+		Async:        cfg.Async,
+		Depth:        childTS.depth,
+	})
 
 	// 7. Defer cleanup: deliver result (for async), emit End event, and recover from panics
 	defer func() {
@@ -480,6 +504,28 @@ func spawnSubTurn(
 				Status:  status,
 			},
 		)
+		promptTokens, completionTokens := childTS.TokenTotals()
+		endPayload := PicoSubTurn{
+			Phase:        SubTurnPhaseEnd,
+			ChildTurnID:  childID,
+			ParentTurnID: parentTS.turnID,
+			AgentID:      childTS.agentID,
+			Label:        label,
+			ToolCallID:   spawnToolCallID,
+			Async:        cfg.Async,
+			Depth:        childTS.depth,
+			Status:       status,
+			DurationMs:   time.Since(spawnedAt).Milliseconds(),
+			InputTokens:  promptTokens,
+			OutputTokens: completionTokens,
+		}
+		if err != nil {
+			endPayload.Reason = err.Error()
+		}
+		if result != nil {
+			endPayload.ResultLen = len([]rune(result.ForLLM))
+		}
+		al.publishPicoSubTurn(parentTS, endPayload)
 	}()
 
 	// 8. Execute sub-turn via the real agent loop.
@@ -550,6 +596,7 @@ func deliverSubTurnResult(al *AgentLoop, parentTS *turnState, childID string, re
 					parentTS.eventMeta("deliverSubTurnResult", "subturn.orphan"),
 					SubTurnOrphanPayload{ParentTurnID: parentTS.turnID, ChildTurnID: childID, Reason: "panic"},
 				)
+				publishPicoSubTurnOrphan(al, parentTS, childID, "panic")
 			}
 		}
 	}()
@@ -565,6 +612,7 @@ func deliverSubTurnResult(al *AgentLoop, parentTS *turnState, childID string, re
 				parentTS.eventMeta("deliverSubTurnResult", "subturn.orphan"),
 				SubTurnOrphanPayload{ParentTurnID: parentTS.turnID, ChildTurnID: childID, Reason: "parent_finished"},
 			)
+			publishPicoSubTurnOrphan(al, parentTS, childID, "parent_finished")
 		}
 		return
 	}
@@ -581,6 +629,16 @@ func deliverSubTurnResult(al *AgentLoop, parentTS *turnState, childID string, re
 				parentTS.eventMeta("deliverSubTurnResult", "subturn.result_delivered"),
 				SubTurnResultDeliveredPayload{ContentLen: len(result.ForLLM)},
 			)
+			resultLen := 0
+			if result != nil {
+				resultLen = len([]rune(result.ForLLM))
+			}
+			al.publishPicoSubTurn(parentTS, PicoSubTurn{
+				Phase:        SubTurnPhaseResultDelivered,
+				ChildTurnID:  childID,
+				ParentTurnID: parentTS.turnID,
+				ResultLen:    resultLen,
+			})
 		}
 	case <-parentTS.Finished():
 		// Parent finished while we were waiting to deliver.
@@ -599,6 +657,7 @@ func deliverSubTurnResult(al *AgentLoop, parentTS *turnState, childID string, re
 					Reason:       "parent_finished_waiting",
 				},
 			)
+			publishPicoSubTurnOrphan(al, parentTS, childID, "parent_finished_waiting")
 		}
 	}
 }
@@ -705,4 +764,13 @@ func (e *ephemeralSessionStore) truncateLocked() {
 	if len(e.history) > maxEphemeralHistorySize {
 		e.history = e.history[len(e.history)-maxEphemeralHistorySize:]
 	}
+}
+
+func publishPicoSubTurnOrphan(al *AgentLoop, parentTS *turnState, childID, reason string) {
+	al.publishPicoSubTurn(parentTS, PicoSubTurn{
+		Phase:        SubTurnPhaseOrphan,
+		ChildTurnID:  childID,
+		ParentTurnID: parentTS.turnID,
+		Reason:       reason,
+	})
 }

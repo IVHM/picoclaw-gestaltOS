@@ -6266,9 +6266,9 @@ func TestRun_PicoPublishesAssistantContentDuringToolCallsWithoutFinalDuplicate(t
 		t.Fatalf("PublishInbound() error = %v", err)
 	}
 
-	outputs := make([]bus.OutboundMessage, 0, 3)
+	outputs := make([]bus.OutboundMessage, 0, 4)
 	deadline := time.After(2 * time.Second)
-	for len(outputs) < 3 {
+	for len(outputs) < 4 {
 		select {
 		case outbound := <-msgBus.OutboundChan():
 			outputs = append(outputs, outbound)
@@ -6286,8 +6286,9 @@ func TestRun_PicoPublishesAssistantContentDuringToolCallsWithoutFinalDuplicate(t
 	if !strings.Contains(outputs[1].Context.Raw[metadataKeyToolCalls], "tool_limit_test_tool") {
 		t.Fatalf("second outbound tool_calls = %q, want tool name", outputs[1].Context.Raw[metadataKeyToolCalls])
 	}
-	if outputs[2].Content != "final model text" {
-		t.Fatalf("third outbound content = %q, want %q", outputs[2].Content, "final model text")
+	assertPicoToolResultPairsWithCall(t, outputs[1], outputs[2], "tool limit test result")
+	if outputs[3].Content != "final model text" {
+		t.Fatalf("fourth outbound content = %q, want %q", outputs[3].Content, "final model text")
 	}
 
 	runCancel()
@@ -6404,7 +6405,7 @@ func TestRun_PicoToolFeedbackSuppressesDuplicateInterimAssistantContent(t *testi
 
 	outputs := make([]bus.OutboundMessage, 0, 3)
 	deadline := time.After(2 * time.Second)
-	for len(outputs) < 2 {
+	for len(outputs) < 3 {
 		select {
 		case outbound := <-msgBus.OutboundChan():
 			outputs = append(outputs, outbound)
@@ -6422,8 +6423,9 @@ func TestRun_PicoToolFeedbackSuppressesDuplicateInterimAssistantContent(t *testi
 	if !strings.Contains(outputs[0].Context.Raw[metadataKeyToolCalls], "tool_limit_test_tool") {
 		t.Fatalf("first outbound tool_calls = %q, want tool name", outputs[0].Context.Raw[metadataKeyToolCalls])
 	}
-	if outputs[1].Content != "final model text" {
-		t.Fatalf("second outbound content = %q, want %q", outputs[1].Content, "final model text")
+	assertPicoToolResultPairsWithCall(t, outputs[0], outputs[1], "tool limit test result")
+	if outputs[2].Content != "final model text" {
+		t.Fatalf("third outbound content = %q, want %q", outputs[2].Content, "final model text")
 	}
 
 	runCancel()

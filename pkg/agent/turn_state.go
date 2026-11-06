@@ -244,6 +244,8 @@ type turnState struct {
 	tokenBudget      *atomic.Int64        // Shared token budget counter
 	lastFinishReason string               // Last LLM finish_reason
 	lastUsage        *providers.UsageInfo // Last LLM usage info
+	promptTokens     int                  // Prompt tokens summed over this turn's LLM calls
+	completionTokens int                  // Completion tokens summed over this turn's LLM calls
 
 	// Back-reference to the owning AgentLoop (set for SubTurns only, used for hard abort cascade)
 	al *AgentLoop
@@ -632,13 +634,14 @@ func (ts *turnState) hardAbortRequested() bool {
 func (ts *turnState) eventMeta(source, tracePath string) HookMeta {
 	snap := ts.snapshot()
 	return HookMeta{
-		AgentID:     snap.AgentID,
-		TurnID:      snap.TurnID,
-		SessionKey:  snap.SessionKey,
-		Iteration:   snap.Iteration,
-		Source:      source,
-		TracePath:   tracePath,
-		turnContext: cloneTurnContext(ts.turnCtx),
+		AgentID:      snap.AgentID,
+		TurnID:       snap.TurnID,
+		ParentTurnID: snap.ParentTurnID,
+		SessionKey:   snap.SessionKey,
+		Iteration:    snap.Iteration,
+		Source:       source,
+		TracePath:    tracePath,
+		turnContext:  cloneTurnContext(ts.turnCtx),
 	}
 }
 
@@ -882,6 +885,17 @@ func (ts *turnState) SetLastUsage(usage *providers.UsageInfo) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.lastUsage = usage
+	if usage != nil {
+		ts.promptTokens += usage.PromptTokens
+		ts.completionTokens += usage.CompletionTokens
+	}
+}
+
+// TokenTotals returns prompt and completion tokens summed over the turn.
+func (ts *turnState) TokenTotals() (prompt, completion int) {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return ts.promptTokens, ts.completionTokens
 }
 
 // =============================================================================

@@ -22,15 +22,24 @@ const (
 	TypeError         = "error"
 	TypePong          = "pong"
 
+	// Activity messages, sent from server to client. They use their own types
+	// rather than message.create so existing clients (the web UI, pico_client
+	// mode) ignore them instead of rendering or re-ingesting them.
+	TypeToolResult   = "tool.result"
+	TypeSubTurnEvent = "subturn.event"
+
 	PayloadKeyContent     = "content"
 	PayloadKeyThought     = "thought"
 	PayloadKeyKind        = "kind"
 	PayloadKeyPlaceholder = "placeholder"
 	PayloadKeyToolCalls   = "tool_calls"
 	PayloadKeyModelName   = "model_name"
+	PayloadKeyTurnID      = "turn_id"
 
-	MessageKindThought   = "thought"
-	MessageKindToolCalls = "tool_calls"
+	MessageKindThought    = "thought"
+	MessageKindToolCalls  = "tool_calls"
+	MessageKindToolResult = "tool_result"
+	MessageKindSubTurn    = "subturn"
 )
 
 // PicoMessage is the wire format for all Pico Protocol messages.

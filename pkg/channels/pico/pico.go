@@ -65,10 +65,29 @@ func outboundMessageIsToolCalls(msg bus.OutboundMessage) bool {
 	return strings.EqualFold(strings.TrimSpace(msg.Context.Raw["message_kind"]), MessageKindToolCalls)
 }
 
+// outboundMessageActivityKind reports the kind of a structured activity
+// message (tool_result, subturn), or "" for any other message. Activity
+// messages are side-channel events for live clients: they never touch tool
+// feedback tracking.
+func outboundMessageActivityKind(msg bus.OutboundMessage) string {
+	if len(msg.Context.Raw) == 0 {
+		return ""
+	}
+	kind := strings.TrimSpace(msg.Context.Raw["message_kind"])
+	switch {
+	case strings.EqualFold(kind, MessageKindToolResult):
+		return MessageKindToolResult
+	case strings.EqualFold(kind, MessageKindSubTurn):
+		return MessageKindSubTurn
+	}
+	return ""
+}
+
 func outboundMessageFinalizesTrackedToolFeedback(msg bus.OutboundMessage) bool {
 	return !outboundMessageIsToolFeedback(msg) &&
 		!outboundMessageIsThought(msg) &&
-		!outboundMessageIsToolCalls(msg)
+		!outboundMessageIsToolCalls(msg) &&
+		outboundMessageActivityKind(msg) == ""
 }
 
 // writeJSON sends a JSON message to the connection with write locking.
@@ -300,6 +319,9 @@ func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 	isThought := outboundMessageIsThought(msg)
 	isToolFeedback := outboundMessageIsToolFeedback(msg)
 	isToolCalls := outboundMessageIsToolCalls(msg)
+	if activityKind := outboundMessageActivityKind(msg); activityKind != "" {
+		return c.sendActivity(msg, activityKind)
+	}
 	if isToolFeedback {
 		if msgID, handled, err := c.progress.Update(ctx, msg.ChatID, msg.Content); handled {
 			if err != nil {
@@ -341,6 +363,9 @@ func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 		payload[PayloadKeyKind] = MessageKindToolCalls
 		if toolCalls, ok := picoToolCallsPayload(msg); ok {
 			payload[PayloadKeyToolCalls] = toolCalls
+		}
+		if turnID := strings.TrimSpace(msg.Context.Raw[PayloadKeyTurnID]); turnID != "" {
+			payload[PayloadKeyTurnID] = turnID
 		}
 	}
 	setContextUsagePayload(payload, msg.ContextUsage)
@@ -1401,6 +1426,24 @@ func setContextUsagePayload(payload map[string]any, u *bus.ContextUsage) {
 		"summarize_at_tokens": u.SummarizeAtTokens,
 		"used_percent":        u.UsedPercent,
 	}
+}
+
+// sendActivity broadcasts a tool_result as tool.result, or a subturn as
+// subturn.event. The payload is the JSON object the agent encoded, as is.
+// It returns no message ids: activity messages cannot be edited or deleted.
+func (c *PicoChannel) sendActivity(msg bus.OutboundMessage, kind string) ([]string, error) {
+	msgType := TypeToolResult
+	if kind == MessageKindSubTurn {
+		msgType = TypeSubTurnEvent
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(msg.Context.Raw[kind]), &payload); err != nil || len(payload) == 0 {
+		return nil, nil
+	}
+	// Best effort: with no client attached the event is simply not seen, and
+	// retrying it would only delay the messages queued behind it.
+	_ = c.broadcastToSession(msg.ChatID, newMessage(msgType, payload))
+	return nil, nil
 }
 
 func picoToolCallsPayload(msg bus.OutboundMessage) ([]utils.VisibleToolCall, bool) {

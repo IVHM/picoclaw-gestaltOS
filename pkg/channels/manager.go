@@ -177,6 +177,18 @@ func outboundMessageIsToolCalls(msg bus.OutboundMessage) bool {
 	return strings.EqualFold(strings.TrimSpace(msg.Context.Raw["message_kind"]), "tool_calls")
 }
 
+// outboundMessageIsActivity reports structured activity messages (tool_result,
+// subturn). They are side-channel events for live clients and must not stop
+// typing, undo reactions, consume placeholders, or be dropped by stream
+// suppression.
+func outboundMessageIsActivity(msg bus.OutboundMessage) bool {
+	if len(msg.Context.Raw) == 0 {
+		return false
+	}
+	kind := strings.TrimSpace(msg.Context.Raw["message_kind"])
+	return strings.EqualFold(kind, "tool_result") || strings.EqualFold(kind, "subturn")
+}
+
 func outboundMessageHasAuxiliaryKind(msg bus.OutboundMessage) bool {
 	if len(msg.Context.Raw) == 0 {
 		return false
@@ -368,6 +380,10 @@ func (m *Manager) RecordReactionUndo(channel, chatID string, undo func()) {
 // preSend handles typing stop, reaction undo, and placeholder editing before sending a message.
 // Returns the delivered message IDs and true when delivery completed before a normal Send.
 func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMessage, ch Channel) ([]string, bool) {
+	if outboundMessageIsActivity(msg) {
+		return nil, false
+	}
+
 	chatID := outboundMessageChatID(msg)
 	key := name + ":" + chatID
 	streamKey := streamSuppressionKey(name, chatID, msg.SessionKey)

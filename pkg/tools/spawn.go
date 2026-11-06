@@ -138,6 +138,7 @@ Task: %s`,
 				Async:         true, // Async execution
 				Critical:      true, // Background spawn should survive parent turn completion
 				TargetAgentID: targetAgentID,
+				Label:         label,
 			})
 			if err != nil {
 				result = ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)

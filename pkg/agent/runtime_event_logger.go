@@ -314,6 +314,12 @@ func appendRuntimeEventPayloadSummary(fields map[string]any, payload any) {
 	case SubTurnSpawnPayload:
 		fields["child_agent_id"] = payload.AgentID
 		fields["label"] = payload.Label
+		if payload.ChildTurnID != "" {
+			fields["child_turn_id"] = payload.ChildTurnID
+		}
+		if payload.ToolCallID != "" {
+			fields["tool_call_id"] = payload.ToolCallID
+		}
 	case SubTurnEndPayload:
 		fields["child_agent_id"] = payload.AgentID
 		fields["status"] = payload.Status
