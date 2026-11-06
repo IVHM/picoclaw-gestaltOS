@@ -167,8 +167,10 @@ type InterruptReceivedPayload struct {
 // SubTurnSpawnPayload describes the creation of a child turn.
 type SubTurnSpawnPayload struct {
 	AgentID      string
-	Label        string
+	Label        string // Human label from the spawn tool; the child turn id when none was given
 	ParentTurnID string
+	ChildTurnID  string // Generated sub-turn id (subturn-N); tool events of the child carry it as TurnID
+	ToolCallID   string // Id of the tool call that spawned the child, when known
 }
 
 // SubTurnEndPayload describes the completion of a child turn.

@@ -31,6 +31,7 @@ type SubTurnConfig struct {
 	InitialMessages    []providers.Message
 	InitialTokenBudget *atomic.Int64 // Shared token budget for team members; nil if no budget
 	TargetAgentID      string        // If set, run as this agent (its workspace, model, tools)
+	Label              string        // Human label for the child, shown by clients; "" = generated id
 }
 
 type SubagentTask struct {
@@ -423,6 +424,7 @@ Task: %s`,
 			MaxTokens:    t.maxTokens,
 			Temperature:  t.temperature,
 			Async:        false, // Synchronous execution
+			Label:        label,
 		})
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("Subagent execution failed: %v", err)).WithError(err)

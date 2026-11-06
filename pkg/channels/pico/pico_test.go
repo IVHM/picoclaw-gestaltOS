@@ -1039,3 +1039,161 @@ func newTestPicoWebSocket(t *testing.T) (*websocket.Conn, <-chan PicoMessage, fu
 	defer resp.Body.Close()
 	return clientConn, received, cleanup
 }
+
+func TestSend_ToolResultUsesOwnTypeAndPassesPayloadThrough(t *testing.T) {
+	ch := newTestPicoChannel(t)
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	clientConn, received, cleanup := newTestPicoWebSocket(t)
+	defer cleanup()
+	ch.addConnForTest(&picoConn{id: "conn-1", conn: clientConn, sessionID: "sess-1"})
+
+	ids, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID: "pico:sess-1",
+		Context: bus.InboundContext{
+			Channel: "pico",
+			ChatID:  "pico:sess-1",
+			Raw: map[string]string{
+				"message_kind":        MessageKindToolResult,
+				MessageKindToolResult: `{"tool_call_id":"call_1","tool":"read_file","status":"ok","is_error":false,"content":"hello","content_len":5,"duration_ms":12,"turn_id":"main-turn-1"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Send(tool_result) error = %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("Send(tool_result) ids = %v, want none", ids)
+	}
+
+	select {
+	case msg := <-received:
+		if msg.Type != TypeToolResult {
+			t.Fatalf("type = %q, want %q", msg.Type, TypeToolResult)
+		}
+		if msg.SessionID != "sess-1" {
+			t.Fatalf("session_id = %q", msg.SessionID)
+		}
+		if got := msg.Payload["tool_call_id"]; got != "call_1" {
+			t.Fatalf("tool_call_id = %#v", got)
+		}
+		if got := msg.Payload["content"]; got != "hello" {
+			t.Fatalf("content = %#v", got)
+		}
+		if got := msg.Payload["turn_id"]; got != "main-turn-1" {
+			t.Fatalf("turn_id = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected tool.result message")
+	}
+}
+
+func TestSend_SubTurnUsesOwnType(t *testing.T) {
+	ch := newTestPicoChannel(t)
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	clientConn, received, cleanup := newTestPicoWebSocket(t)
+	defer cleanup()
+	ch.addConnForTest(&picoConn{id: "conn-1", conn: clientConn, sessionID: "sess-1"})
+
+	if _, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID: "pico:sess-1",
+		Context: bus.InboundContext{
+			Channel: "pico",
+			ChatID:  "pico:sess-1",
+			Raw: map[string]string{
+				"message_kind":     MessageKindSubTurn,
+				MessageKindSubTurn: `{"phase":"spawn","child_turn_id":"subturn-1","parent_turn_id":"main-turn-1","label":"research docs","ts":1}`,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Send(subturn) error = %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if msg.Type != TypeSubTurnEvent {
+			t.Fatalf("type = %q, want %q", msg.Type, TypeSubTurnEvent)
+		}
+		if got := msg.Payload["label"]; got != "research docs" {
+			t.Fatalf("label = %#v", got)
+		}
+		if got := msg.Payload["phase"]; got != "spawn" {
+			t.Fatalf("phase = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected subturn.event message")
+	}
+}
+
+func TestSend_ActivityWithoutClientIsNotAnError(t *testing.T) {
+	ch := newTestPicoChannel(t)
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	if _, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID: "pico:nobody",
+		Context: bus.InboundContext{
+			Channel: "pico",
+			ChatID:  "pico:nobody",
+			Raw: map[string]string{
+				"message_kind":        MessageKindToolResult,
+				MessageKindToolResult: `{"tool_call_id":"call_1"}`,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Send(tool_result) with no client error = %v", err)
+	}
+}
+
+func TestSend_ToolCallsMessageCarriesCallIDAndTurnID(t *testing.T) {
+	ch := newTestPicoChannel(t)
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	clientConn, received, cleanup := newTestPicoWebSocket(t)
+	defer cleanup()
+	ch.addConnForTest(&picoConn{id: "conn-1", conn: clientConn, sessionID: "sess-1"})
+
+	if _, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID: "pico:sess-1",
+		Context: bus.InboundContext{
+			Channel: "pico",
+			ChatID:  "pico:sess-1",
+			Raw: map[string]string{
+				"message_kind":      MessageKindToolCalls,
+				PayloadKeyTurnID:    "main-turn-1",
+				PayloadKeyToolCalls: `[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]`,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Send(tool_calls) error = %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if got := msg.Payload[PayloadKeyTurnID]; got != "main-turn-1" {
+			t.Fatalf("turn_id = %#v", got)
+		}
+		calls, _ := msg.Payload[PayloadKeyToolCalls].([]any)
+		if len(calls) != 1 {
+			t.Fatalf("tool_calls = %#v", msg.Payload[PayloadKeyToolCalls])
+		}
+		call, _ := calls[0].(map[string]any)
+		if call["id"] != "call_1" {
+			t.Fatalf("tool call id = %#v", call["id"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected tool_calls message")
+	}
+}

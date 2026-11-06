@@ -50,6 +50,7 @@ var (
 	ctxKeyAgentID          = &toolCtxKey{"agentID"}
 	ctxKeySessionKey       = &toolCtxKey{"sessionKey"}
 	ctxKeySessionScope     = &toolCtxKey{"sessionScope"}
+	ctxKeyToolCallID       = &toolCtxKey{"toolCallID"}
 )
 
 // WithToolContext returns a child context carrying channel and chatID.
@@ -100,6 +101,21 @@ func ToolChannel(ctx context.Context) string {
 // ToolChatID extracts the chatID from ctx, or "" if unset.
 func ToolChatID(ctx context.Context) string {
 	v, ok := ctx.Value(ctxKeyChatID).(string)
+	if !ok {
+		return ""
+	}
+	return v
+}
+
+// WithToolCallID records the id of the tool call being executed, so work the
+// tool starts (such as a sub-turn) can be tied back to that call.
+func WithToolCallID(ctx context.Context, toolCallID string) context.Context {
+	return context.WithValue(ctx, ctxKeyToolCallID, toolCallID)
+}
+
+// ToolCallID extracts the id of the tool call being executed, or "" if unset.
+func ToolCallID(ctx context.Context) string {
+	v, ok := ctx.Value(ctxKeyToolCallID).(string)
 	if !ok {
 		return ""
 	}

@@ -90,6 +90,7 @@ func (t *DelegateTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		TargetAgentID: agentID,
 		SystemPrompt:  task,
 		Async:         false,
+		Label:         agentID,
 	})
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("delegation to agent %q failed: %v", agentID, err)).WithError(err)

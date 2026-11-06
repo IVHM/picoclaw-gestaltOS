@@ -151,6 +151,7 @@ toolLoop:
 				ToolCallID: tc.ID,
 			}
 			messages = append(messages, deniedMsg)
+			al.publishPicoToolResult(turnCtx, ts, tc.ID, toolName, ToolResultStatusDenied, denyContent, 0, false)
 			if !ts.opts.NoHistory {
 				ts.agent.Sessions.AddFullMessage(ts.sessionKey, deniedMsg)
 				ts.recordPersistedMessage(deniedMsg)
@@ -326,6 +327,7 @@ toolLoop:
 					)
 
 					messages = append(messages, toolResultMsg)
+					al.publishPicoToolResult(turnCtx, ts, tc.ID, toolName, picoToolResultStatus(hookResult.IsError), contentForLLM, toolDuration, hookResult.Async)
 					if !ts.opts.NoHistory {
 						ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)
 						ts.recordPersistedMessage(toolResultMsg)
@@ -372,6 +374,7 @@ toolLoop:
 									ToolCallID: skippedTC.ID,
 								}
 								messages = append(messages, skippedMsg)
+								al.publishPicoToolResult(turnCtx, ts, skippedTC.ID, skippedTC.Name, ToolResultStatusSkipped, skipMessage, 0, false)
 								if !ts.opts.NoHistory {
 									ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
 									ts.recordPersistedMessage(skippedMsg)
@@ -421,6 +424,7 @@ toolLoop:
 					ToolCallID: tc.ID,
 				}
 				messages = append(messages, deniedMsg)
+				al.publishPicoToolResult(turnCtx, ts, tc.ID, toolName, ToolResultStatusDenied, denyContent, 0, false)
 				if !ts.opts.NoHistory {
 					ts.agent.Sessions.AddFullMessage(ts.sessionKey, deniedMsg)
 					ts.recordPersistedMessage(deniedMsg)
@@ -460,6 +464,7 @@ toolLoop:
 					ToolCallID: tc.ID,
 				}
 				messages = append(messages, deniedMsg)
+				al.publishPicoToolResult(turnCtx, ts, tc.ID, toolName, ToolResultStatusDenied, denyContent, 0, false)
 				if !ts.opts.NoHistory {
 					ts.agent.Sessions.AddFullMessage(ts.sessionKey, deniedMsg)
 					ts.recordPersistedMessage(deniedMsg)
@@ -567,6 +572,7 @@ toolLoop:
 			ts.sessionKey,
 			ts.opts.Dispatch.SessionScope,
 		)
+		execCtx = tools.WithToolCallID(execCtx, toolCallID)
 		toolResult := ts.agent.Tools.ExecuteWithContext(
 			execCtx,
 			toolName,
@@ -714,6 +720,7 @@ toolLoop:
 			inferSkillNamesFromToolCall(ts, toolName, toolArgs),
 		)
 		messages = append(messages, toolResultMsg)
+		al.publishPicoToolResult(turnCtx, ts, toolCallID, toolName, picoToolResultStatus(toolResult.IsError), contentForLLM, toolDuration, toolResult.Async)
 		if !ts.opts.NoHistory {
 			ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)
 			ts.recordPersistedMessage(toolResultMsg)
@@ -760,6 +767,7 @@ toolLoop:
 						ToolCallID: skippedTC.ID,
 					}
 					messages = append(messages, skippedMsg)
+					al.publishPicoToolResult(turnCtx, ts, skippedTC.ID, skippedTC.Name, ToolResultStatusSkipped, skipMessage, 0, false)
 					if !ts.opts.NoHistory {
 						ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
 						ts.recordPersistedMessage(skippedMsg)

@@ -232,6 +232,7 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 		modelName: modelName,
 		raw: map[string]string{
 			metadataKeyToolCalls: string(rawToolCalls),
+			metadataKeyTurnID:    ts.snapshot().TurnID,
 		},
 	})
 

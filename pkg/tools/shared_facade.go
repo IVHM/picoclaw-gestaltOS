@@ -69,6 +69,14 @@ func ToolChatID(ctx context.Context) string {
 	return toolshared.ToolChatID(ctx)
 }
 
+func WithToolCallID(ctx context.Context, toolCallID string) context.Context {
+	return toolshared.WithToolCallID(ctx, toolCallID)
+}
+
+func ToolCallID(ctx context.Context) string {
+	return toolshared.ToolCallID(ctx)
+}
+
 func ToolMessageID(ctx context.Context) string {
 	return toolshared.ToolMessageID(ctx)
 }
