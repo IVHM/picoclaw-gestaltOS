@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -36,6 +37,9 @@ type DelegationGuardConfig struct {
 	// from a file instead (read once, when the hook is built). Empty: no note.
 	SubagentPrompt     string `json:"subagent_prompt"`
 	SubagentPromptFile string `json:"subagent_prompt_file"`
+	// ClaimCheck sends a top-level turn back once when its answer says it
+	// dispatched sub-agents but the turn made no spawn call.
+	ClaimCheck *bool `json:"claim_check"`
 }
 
 // DelegationGuard keeps top-level turns to a small direct tool budget so that
@@ -45,6 +49,7 @@ type DelegationGuard struct {
 	delegate map[string]bool
 	remind   bool
 	gate     bool
+	claims   bool
 	subNote  string
 
 	mu    sync.Mutex
@@ -61,7 +66,14 @@ type delegationTurn struct {
 	attempts int  // direct calls tried, denied ones included
 	spawned  bool // a delegating tool was called
 	gated    bool // the final-answer gate already sent this turn back
+	claimed  bool // the claim check already sent this turn back
 }
+
+// delegationClaim matches an answer that says sub-agents were sent off ("both sub-agents are
+// dispatched", "I've spawned two subagents", "sub-agents are now running").
+var delegationClaim = regexp.MustCompile(
+	`(?i)\b(dispatch(ed|ing)?|spawn(ed|ing)|launch(ed|ing)|delegat(ed|ing)|kicked off|fired off|started)\b[^.\n]{0,60}\bsub-?agents?\b|\bsub-?agents?\b[^.\n]{0,40}\b(are|is)\s+(now\s+)?(dispatched|running|working|in flight|on it)\b`,
+)
 
 func init() {
 	_ = RegisterBuiltinHook(DelegationGuardHookName, newDelegationGuardFromSpec)
@@ -92,6 +104,7 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 		cfg.DelegateTools = []string{"spawn", "spawn_status", "subagent"}
 	}
 	g := &DelegationGuard{
+		claims:   cfg.ClaimCheck == nil || *cfg.ClaimCheck,
 		max:      cfg.MaxDirectCalls,
 		delegate: map[string]bool{},
 		remind:   cfg.Remind == nil || *cfg.Remind,
@@ -183,10 +196,27 @@ func (g *DelegationGuard) AfterLLM(_ context.Context, resp *LLMHookResponse) (*L
 		len(resp.Response.ToolCalls) > 0 || strings.TrimSpace(resp.Response.Content) == "" {
 		return resp, HookDecision{Action: HookActionContinue}, nil
 	}
+	if g.claims && !asyncResultTurn(resp.Context) && delegationClaim.MatchString(resp.Response.Content) {
+		g.mu.Lock()
+		t := g.turn(resp.Meta.TurnID)
+		steer := g.steer
+		fire := steer != nil && !t.spawned && !t.claimed
+		if fire {
+			t.claimed = true
+		}
+		g.mu.Unlock()
+		if fire {
+			note := "[delegation guard] Your answer says sub-agents were dispatched, but this turn made no " +
+				"spawn call, so nothing is running. Call the spawn tool now for that work, or correct your " +
+				"answer. The next answer will be sent."
+			_ = steer(resp.Meta.SessionKey, resp.Meta.AgentID, providers.Message{Role: "user", Content: note})
+			return resp, HookDecision{Action: HookActionContinue}, nil
+		}
+	}
 	g.mu.Lock()
 	t, ok := g.turns[resp.Meta.TurnID]
 	steer := g.steer
-	if !ok || steer == nil || t.gated || t.spawned || t.attempts <= g.max {
+	if !ok || steer == nil || t.gated || t.claimed || t.spawned || t.attempts <= g.max {
 		g.mu.Unlock()
 		return resp, HookDecision{Action: HookActionContinue}, nil
 	}
@@ -236,4 +266,11 @@ func (g *DelegationGuard) AfterTool(
 	result *ToolResultHookResponse,
 ) (*ToolResultHookResponse, HookDecision, error) {
 	return result, HookDecision{Action: HookActionContinue}, nil
+}
+
+// asyncResultTurn reports a turn that PicoClaw started to deliver an async
+// tool's result (sender "async:<tool>"). Its answer talks about sub-agents
+// that ran in an earlier turn, so it is not a claim.
+func asyncResultTurn(tc *TurnContext) bool {
+	return tc != nil && tc.Inbound != nil && strings.HasPrefix(tc.Inbound.SenderID, "async:")
 }

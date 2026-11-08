@@ -261,3 +261,59 @@ func TestDelegationGuardSubagentPromptFile(t *testing.T) {
 		t.Fatal("a missing prompt file should fail the hook config")
 	}
 }
+
+func TestDelegationGuardClaimCheck(t *testing.T) {
+	newGuard := func() (*DelegationGuard, *int) {
+		g := NewDelegationGuard(DelegationGuardConfig{MaxDirectCalls: 2})
+		n := 0
+		g.steer = func(string, string, providers.Message) error { n++; return nil }
+		return g, &n
+	}
+	answer := func(meta HookMeta, tc *TurnContext, text string) *LLMHookResponse {
+		return &LLMHookResponse{Meta: meta, Context: tc, Response: &providers.LLMResponse{Content: text}}
+	}
+	claims := []string{
+		"Both sub-agents are dispatched — replying now, table to follow.",
+		"I've spawned two subagents to inspect the folders.",
+		"The sub-agents are now running in parallel.",
+		"Delegated the audit to a sub-agent; results will follow.",
+	}
+	for _, text := range claims {
+		g, n := newGuard()
+		meta := HookMeta{TurnID: "t1"}
+		mustContinueAfterLLM(t, g, answer(meta, nil, text))
+		mustContinueAfterLLM(t, g, answer(meta, nil, text))
+		if *n != 1 {
+			t.Errorf("%q: claim check fired %d times, want once", text, *n)
+		}
+	}
+	notClaims := []string{
+		"Here is the table you asked for.",
+		"I read both files myself; no sub-agent was needed.",
+	}
+	for _, text := range notClaims {
+		g, n := newGuard()
+		mustContinueAfterLLM(t, g, answer(HookMeta{TurnID: "t1"}, nil, text))
+		if *n != 0 {
+			t.Errorf("%q: fired on a plain answer", text)
+		}
+	}
+	// A turn that did spawn, a turn that delivers async results, and a sub-turn are not checked.
+	g, n := newGuard()
+	tryTool(g, &ToolCallHookRequest{Meta: HookMeta{TurnID: "t1"}, Tool: "spawn"})
+	mustContinueAfterLLM(t, g, answer(HookMeta{TurnID: "t1"}, nil, claims[0]))
+	async := &TurnContext{Inbound: &bus.InboundContext{SenderID: "async:spawn"}}
+	mustContinueAfterLLM(t, g, answer(HookMeta{TurnID: "t2"}, async, "The sub-agents I spawned earlier reported back."))
+	mustContinueAfterLLM(t, g, answer(HookMeta{TurnID: "s1", ParentTurnID: "t1"}, nil, claims[1]))
+	if *n != 0 {
+		t.Errorf("fired %d times on spawned/async/sub-turn answers", *n)
+	}
+	off := false
+	g = NewDelegationGuard(DelegationGuardConfig{ClaimCheck: &off})
+	fired := 0
+	g.steer = func(string, string, providers.Message) error { fired++; return nil }
+	mustContinueAfterLLM(t, g, answer(HookMeta{TurnID: "t1"}, nil, claims[0]))
+	if fired != 0 {
+		t.Error("claim_check=false: fired")
+	}
+}
