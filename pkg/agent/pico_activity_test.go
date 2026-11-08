@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
@@ -219,5 +220,22 @@ func TestEventMeta_CarriesParentTurnID(t *testing.T) {
 	meta := ts.eventMeta("test", "test")
 	if meta.TurnID != "turn-1" || meta.ParentTurnID != "turn-0" {
 		t.Fatalf("meta turn=%q parent=%q", meta.TurnID, meta.ParentTurnID)
+	}
+}
+
+func TestPicoTurnRaw_CarriesTurnIDAndTokenTotals(t *testing.T) {
+	ts := &turnState{turnID: "main-turn-9"}
+	raw := picoTurnRaw(ts, map[string]string{"x": "1"})
+	if raw[metadataKeyTurnID] != "main-turn-9" || raw["x"] != "1" {
+		t.Fatalf("raw = %#v", raw)
+	}
+	if _, ok := raw[metadataKeyTurnInputTokens]; ok {
+		t.Fatalf("token keys should be absent before any usage: %#v", raw)
+	}
+	ts.SetLastUsage(&providers.UsageInfo{PromptTokens: 500, CompletionTokens: 20})
+	ts.SetLastUsage(&providers.UsageInfo{PromptTokens: 700, CompletionTokens: 30})
+	raw = picoTurnRaw(ts, nil)
+	if raw[metadataKeyTurnInputTokens] != "1200" || raw[metadataKeyTurnOutputTokens] != "50" {
+		t.Fatalf("raw = %#v", raw)
 	}
 }

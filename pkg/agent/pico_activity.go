@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,10 @@ const (
 	metadataKeyToolResult = "tool_result"
 	metadataKeySubTurn    = "subturn"
 	metadataKeyTurnID     = "turn_id"
+	// Prompt and completion tokens summed over the turn so far (all LLM calls,
+	// tool loop included). Sent on tool_calls and on the final answer.
+	metadataKeyTurnInputTokens  = "turn_input_tokens"
+	metadataKeyTurnOutputTokens = "turn_output_tokens"
 
 	// picoToolResultMaxContentRunes caps the result text sent to the socket.
 	// The full result stays in the session store; content_len reports its size.
@@ -171,4 +176,23 @@ func (al *AgentLoop) publishPicoActivity(
 			"error":   err.Error(),
 		})
 	}
+}
+
+// picoTurnRaw is the outbound metadata that ties a pico message to its turn:
+// the turn id and the turn's token totals so far. Token keys are left out
+// while both counts are zero.
+func picoTurnRaw(ts *turnState, extra map[string]string) map[string]string {
+	raw := make(map[string]string, len(extra)+3)
+	for k, v := range extra {
+		raw[k] = v
+	}
+	if ts == nil {
+		return raw
+	}
+	raw[metadataKeyTurnID] = ts.snapshot().TurnID
+	if in, out := ts.TokenTotals(); in > 0 || out > 0 {
+		raw[metadataKeyTurnInputTokens] = strconv.Itoa(in)
+		raw[metadataKeyTurnOutputTokens] = strconv.Itoa(out)
+	}
+	return raw
 }

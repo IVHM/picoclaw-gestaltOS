@@ -80,6 +80,16 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 	}
 	if sessionKey != "" {
 		msg.ContextUsage = computeContextUsage(al.agentForSession(sessionKey), sessionKey)
+		if raw, ok := al.finishedTurnRaw.LoadAndDelete(sessionKey); ok {
+			if turnRaw, ok := raw.(map[string]string); ok {
+				if msg.Context.Raw == nil {
+					msg.Context.Raw = make(map[string]string, len(turnRaw)+1)
+				}
+				for key, value := range turnRaw {
+					msg.Context.Raw[key] = value
+				}
+			}
+		}
 	}
 	markFinalOutbound(&msg)
 	al.bus.PublishOutbound(ctx, msg)
@@ -230,10 +240,9 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	msg := outboundMessageForTurnWithOptions(ts, "", outboundTurnMessageOptions{
 		kind:      messageKindToolCalls,
 		modelName: modelName,
-		raw: map[string]string{
+		raw: picoTurnRaw(ts, map[string]string{
 			metadataKeyToolCalls: string(rawToolCalls),
-			metadataKeyTurnID:    ts.snapshot().TurnID,
-		},
+		}),
 	})
 
 	pubCtx, pubCancel := context.WithTimeout(ctx, 3*time.Second)

@@ -1197,3 +1197,54 @@ func TestSend_ToolCallsMessageCarriesCallIDAndTurnID(t *testing.T) {
 		t.Fatal("expected tool_calls message")
 	}
 }
+
+func TestSend_FinalMessageCarriesTurnIDAndTurnUsage(t *testing.T) {
+	ch := newTestPicoChannel(t)
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	clientConn, received, cleanup := newTestPicoWebSocket(t)
+	defer cleanup()
+	ch.addConnForTest(&picoConn{id: "conn-1", conn: clientConn, sessionID: "sess-1"})
+
+	if _, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID:  "pico:sess-1",
+		Content: "done",
+		Context: bus.InboundContext{
+			Channel: "pico",
+			ChatID:  "pico:sess-1",
+			Raw: map[string]string{
+				PayloadKeyTurnID:     "main-turn-3",
+				"turn_input_tokens":  "1200",
+				"turn_output_tokens": "80",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if got := msg.Payload[PayloadKeyTurnID]; got != "main-turn-3" {
+			t.Fatalf("turn_id = %#v", got)
+		}
+		usage, _ := msg.Payload[PayloadKeyTurnUsage].(map[string]any)
+		if usage["input_tokens"] != float64(1200) || usage["output_tokens"] != float64(80) ||
+			usage["total_tokens"] != float64(1280) {
+			t.Fatalf("turn_usage = %#v", msg.Payload[PayloadKeyTurnUsage])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected message")
+	}
+}
+
+func TestSetTurnPayload_SkipsMissingOrZeroUsage(t *testing.T) {
+	payload := map[string]any{}
+	setTurnPayload(payload, map[string]string{"turn_input_tokens": "0", "turn_output_tokens": "0"})
+	setTurnPayload(payload, map[string]string{"turn_input_tokens": "x"})
+	if len(payload) != 0 {
+		t.Fatalf("payload = %#v, want empty", payload)
+	}
+}

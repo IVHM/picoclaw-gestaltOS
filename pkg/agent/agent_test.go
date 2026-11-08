@@ -471,6 +471,35 @@ func TestPublishResponseIfNeeded_MarksFinalOutbound(t *testing.T) {
 	}
 }
 
+func TestPublishResponseIfNeeded_CarriesFinishedTurnOnce(t *testing.T) {
+	al, _, msgBus, provider, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	_ = provider
+
+	al.finishedTurnRaw.Store("session-1", map[string]string{
+		metadataKeyTurnID:           "main-turn-4",
+		metadataKeyTurnInputTokens:  "900",
+		metadataKeyTurnOutputTokens: "40",
+	})
+	for i, want := range []string{"main-turn-4", ""} {
+		al.PublishResponseIfNeeded(context.Background(), "pico", "pico:session-1", "session-1", "reply")
+		select {
+		case outbound := <-msgBus.OutboundChan():
+			if got := outbound.Context.Raw[metadataKeyTurnID]; got != want {
+				t.Fatalf("publish %d: turn_id = %q, want %q", i, got, want)
+			}
+			if outbound.Context.Raw[metadataKeyOutboundKind] != outboundKindFinal {
+				t.Fatalf("publish %d: final marker lost: %#v", i, outbound.Context.Raw)
+			}
+			if want != "" && outbound.Context.Raw[metadataKeyTurnInputTokens] != "900" {
+				t.Fatalf("publish %d: raw = %#v", i, outbound.Context.Raw)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("expected final outbound")
+		}
+	}
+}
+
 func TestPublishPicoReasoningIncludesSessionKey(t *testing.T) {
 	al, _, msgBus, provider, cleanup := newTestAgentLoop(t)
 	defer cleanup()

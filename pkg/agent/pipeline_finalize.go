@@ -84,6 +84,7 @@ func (p *Pipeline) Finalize(
 		!ts.opts.SendResponse && ts.opts.AllowInterimPicoPublish && finalContent != "" {
 		msg := outboundMessageForTurnWithOptions(ts, finalContent, outboundTurnMessageOptions{
 			modelName: exec.llmModelName,
+			raw:       picoTurnRaw(ts, nil),
 		})
 		msg.ContextUsage = contextUsage
 		markFinalOutbound(&msg)

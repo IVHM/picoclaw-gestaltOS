@@ -60,7 +60,11 @@ type AgentLoop struct {
 	steering       *steeringQueue
 	pendingSkills  sync.Map
 	pendingStops   sync.Map
-	mu             sync.RWMutex
+	// finishedTurnRaw holds, per session key, the turn id and token totals of
+	// the turn that just ended, for PublishResponseIfNeeded (which only gets
+	// the response text). Taken on first read.
+	finishedTurnRaw sync.Map
+	mu              sync.RWMutex
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
@@ -572,6 +576,9 @@ func (al *AgentLoop) runAgentLoop(
 	if result.status == TurnEndStatusAborted {
 		return "", nil
 	}
+	if !opts.SendResponse && result.finalContent != "" && opts.Dispatch.SessionKey != "" {
+		al.finishedTurnRaw.Store(opts.Dispatch.SessionKey, picoTurnRaw(ts, nil))
+	}
 
 	for _, followUp := range result.followUps {
 		if pubErr := al.bus.PublishInbound(ctx, followUp); pubErr != nil {
@@ -602,11 +609,14 @@ func (al *AgentLoop) runAgentLoop(
 			Content:      result.finalContent,
 			ContextUsage: computeContextUsage(agent, opts.Dispatch.SessionKey),
 		}
+		if msg.Context.Raw == nil {
+			msg.Context.Raw = make(map[string]string, 4)
+		}
 		if modelName := strings.TrimSpace(result.modelName); modelName != "" {
-			if msg.Context.Raw == nil {
-				msg.Context.Raw = make(map[string]string, 1)
-			}
 			msg.Context.Raw["model_name"] = modelName
+		}
+		for key, value := range picoTurnRaw(ts, nil) {
+			msg.Context.Raw[key] = value
 		}
 		markFinalOutbound(&msg)
 		al.bus.PublishOutbound(ctx, msg)

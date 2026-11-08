@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -366,10 +367,8 @@ func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 		if toolCalls, ok := picoToolCallsPayload(msg); ok {
 			payload[PayloadKeyToolCalls] = toolCalls
 		}
-		if turnID := strings.TrimSpace(msg.Context.Raw[PayloadKeyTurnID]); turnID != "" {
-			payload[PayloadKeyTurnID] = turnID
-		}
 	}
+	setTurnPayload(payload, msg.Context.Raw)
 	setContextUsagePayload(payload, msg.ContextUsage)
 	outMsg := newMessage(TypeMessageCreate, payload)
 
@@ -1450,6 +1449,25 @@ func setContextUsagePayload(payload map[string]any, u *bus.ContextUsage) {
 		"compress_at_tokens":  u.CompressAtTokens,
 		"summarize_at_tokens": u.SummarizeAtTokens,
 		"used_percent":        u.UsedPercent,
+	}
+}
+
+// setTurnPayload copies the turn id and the turn's running token totals from
+// the outbound metadata. turn_usage sums every LLM call of the turn so far,
+// unlike usage, which the streaming finalize path fills from the last call.
+func setTurnPayload(payload map[string]any, raw map[string]string) {
+	if turnID := strings.TrimSpace(raw[PayloadKeyTurnID]); turnID != "" {
+		payload[PayloadKeyTurnID] = turnID
+	}
+	in, inErr := strconv.Atoi(raw["turn_input_tokens"])
+	out, outErr := strconv.Atoi(raw["turn_output_tokens"])
+	if inErr != nil || outErr != nil || (in <= 0 && out <= 0) {
+		return
+	}
+	payload[PayloadKeyTurnUsage] = map[string]any{
+		"input_tokens":  in,
+		"output_tokens": out,
+		"total_tokens":  in + out,
 	}
 }
 

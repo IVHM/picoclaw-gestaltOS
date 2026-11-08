@@ -37,6 +37,7 @@ const (
 	PayloadKeyModelName   = "model_name"
 	PayloadKeyUsage       = "usage"
 	PayloadKeyTurnID      = "turn_id"
+	PayloadKeyTurnUsage   = "turn_usage"
 
 	MessageKindThought    = "thought"
 	MessageKindToolCalls  = "tool_calls"
