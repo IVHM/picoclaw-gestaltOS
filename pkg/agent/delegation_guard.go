@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -14,7 +15,7 @@ import (
 // (hooks.builtins.delegation_guard).
 const DelegationGuardHookName = "delegation_guard"
 
-// delegationGuardMaxTurns bounds the per-turn counters kept in memory.
+// delegationGuardMaxTurns bounds the per-turn state kept in memory.
 const delegationGuardMaxTurns = 256
 
 // DelegationGuardConfig is the builtin's config block.
@@ -26,6 +27,9 @@ type DelegationGuardConfig struct {
 	DelegateTools []string `json:"delegate_tools"`
 	// Remind adds a short budget note before each model call of a top-level turn.
 	Remind *bool `json:"remind"`
+	// FinalAnswerGate sends a top-level turn back once when it tries to answer
+	// after going over the direct budget without spawning any sub-agent.
+	FinalAnswerGate *bool `json:"final_answer_gate"`
 }
 
 // DelegationGuard keeps top-level turns to a small direct tool budget so that
@@ -34,10 +38,22 @@ type DelegationGuard struct {
 	max      int
 	delegate map[string]bool
 	remind   bool
+	gate     bool
 
 	mu    sync.Mutex
-	used  map[string]int
+	turns map[string]*delegationTurn
 	order []string
+
+	// steer queues a user message on a session so the running turn continues
+	// instead of finishing. Bound when the hook is mounted on an AgentLoop.
+	steer func(sessionKey, agentID string, msg providers.Message) error
+}
+
+// delegationTurn is what the guard knows about one top-level turn.
+type delegationTurn struct {
+	attempts int  // direct calls tried, denied ones included
+	spawned  bool // a delegating tool was called
+	gated    bool // the final-answer gate already sent this turn back
 }
 
 func init() {
@@ -65,7 +81,8 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 		max:      cfg.MaxDirectCalls,
 		delegate: map[string]bool{},
 		remind:   cfg.Remind == nil || *cfg.Remind,
-		used:     map[string]int{},
+		gate:     cfg.FinalAnswerGate == nil || *cfg.FinalAnswerGate,
+		turns:    map[string]*delegationTurn{},
 	}
 	for _, name := range cfg.DelegateTools {
 		g.delegate[name] = true
@@ -73,36 +90,49 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 	return g
 }
 
+// bindAgentLoop gives the guard the steering queue it needs for the
+// final-answer gate. MountHook calls it.
+func (g *DelegationGuard) bindAgentLoop(al *AgentLoop) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.steer = al.enqueueSteeringMessage
+}
+
 func (g *DelegationGuard) topLevel(meta HookMeta) bool {
 	return meta.ParentTurnID == "" && meta.TurnID != ""
 }
 
-func (g *DelegationGuard) count(turnID string) int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.used[turnID]
-}
-
-// take records one direct call and returns the new total.
-func (g *DelegationGuard) take(turnID string) int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if _, ok := g.used[turnID]; !ok {
+// turn returns the state of a turn, creating it. Callers hold g.mu.
+func (g *DelegationGuard) turn(turnID string) *delegationTurn {
+	t, ok := g.turns[turnID]
+	if !ok {
+		t = &delegationTurn{}
+		g.turns[turnID] = t
 		g.order = append(g.order, turnID)
 		if len(g.order) > delegationGuardMaxTurns {
-			delete(g.used, g.order[0])
+			delete(g.turns, g.order[0])
 			g.order = g.order[1:]
 		}
 	}
-	g.used[turnID]++
-	return g.used[turnID]
+	return t
 }
 
 func (g *DelegationGuard) BeforeLLM(_ context.Context, req *LLMHookRequest) (*LLMHookRequest, HookDecision, error) {
 	if !g.remind || req == nil || !g.topLevel(req.Meta) {
 		return req, HookDecision{Action: HookActionContinue}, nil
 	}
-	left := g.max - g.count(req.Meta.TurnID)
+	g.mu.Lock()
+	t, ok := g.turns[req.Meta.TurnID]
+	used, gated := 0, false
+	if ok {
+		used, gated = t.attempts, t.gated
+	}
+	g.mu.Unlock()
+	if gated {
+		// The final-answer gate's note is the last word for this turn.
+		return req, HookDecision{Action: HookActionContinue}, nil
+	}
+	left := g.max - used
 	var note string
 	if left > 0 {
 		note = fmt.Sprintf("[delegation guard] Direct tool budget for this turn: %d of %d left. "+
@@ -117,7 +147,34 @@ func (g *DelegationGuard) BeforeLLM(_ context.Context, req *LLMHookRequest) (*LL
 	return req, HookDecision{Action: HookActionModify}, nil
 }
 
+// AfterLLM is the final-answer gate. When a top-level turn answers after
+// trying more direct calls than its budget and spawning nothing, it queues one
+// steering message on the session. The pipeline then continues the turn with
+// that message instead of finishing it. It does this at most once per turn,
+// so the second answer always goes through.
 func (g *DelegationGuard) AfterLLM(_ context.Context, resp *LLMHookResponse) (*LLMHookResponse, HookDecision, error) {
+	if !g.gate || resp == nil || resp.Response == nil || !g.topLevel(resp.Meta) ||
+		len(resp.Response.ToolCalls) > 0 || strings.TrimSpace(resp.Response.Content) == "" {
+		return resp, HookDecision{Action: HookActionContinue}, nil
+	}
+	g.mu.Lock()
+	t, ok := g.turns[resp.Meta.TurnID]
+	steer := g.steer
+	if !ok || steer == nil || t.gated || t.spawned || t.attempts <= g.max {
+		g.mu.Unlock()
+		return resp, HookDecision{Action: HookActionContinue}, nil
+	}
+	t.gated = true
+	attempts := t.attempts
+	g.mu.Unlock()
+
+	note := fmt.Sprintf("[delegation guard] Not done yet: this turn tried %d direct tool calls (budget %d) "+
+		"and delegated nothing. Hand the remaining work to sub-agents with the spawn tool, then report. "+
+		"If delegating makes no sense here, reply again and say briefly why; that reply will be sent.",
+		attempts, g.max)
+	// If queueing fails the answer simply goes through; the turn is marked gated either way, so
+	// the gate can never loop.
+	_ = steer(resp.Meta.SessionKey, resp.Meta.AgentID, providers.Message{Role: "user", Content: note})
 	return resp, HookDecision{Action: HookActionContinue}, nil
 }
 
@@ -125,10 +182,20 @@ func (g *DelegationGuard) BeforeTool(
 	_ context.Context,
 	call *ToolCallHookRequest,
 ) (*ToolCallHookRequest, HookDecision, error) {
-	if call == nil || !g.topLevel(call.Meta) || g.delegate[call.Tool] {
+	if call == nil || !g.topLevel(call.Meta) {
 		return call, HookDecision{Action: HookActionContinue}, nil
 	}
-	if n := g.take(call.Meta.TurnID); n > g.max {
+	g.mu.Lock()
+	t := g.turn(call.Meta.TurnID)
+	if g.delegate[call.Tool] {
+		t.spawned = true
+		g.mu.Unlock()
+		return call, HookDecision{Action: HookActionContinue}, nil
+	}
+	t.attempts++
+	over := t.attempts > g.max
+	g.mu.Unlock()
+	if over {
 		return call, HookDecision{
 			Action: HookActionDenyTool,
 			Reason: fmt.Sprintf("this turn may make only %d direct tool calls; this is a multi-step task, "+

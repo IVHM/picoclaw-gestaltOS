@@ -86,6 +86,10 @@ func (al *AgentLoop) MountHook(reg HookRegistration) error {
 	if al == nil || al.hooks == nil {
 		return fmt.Errorf("hook manager is not initialized")
 	}
+	// Builtins that act on the loop itself (e.g. queue a steering message) get it here.
+	if b, ok := reg.Hook.(interface{ bindAgentLoop(al *AgentLoop) }); ok {
+		b.bindAgentLoop(al)
+	}
 	return al.hooks.Mount(reg)
 }
 

@@ -2,8 +2,13 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 func TestDelegationGuardDeniesAfterBudget(t *testing.T) {
@@ -57,5 +62,160 @@ func TestDelegationGuardReminder(t *testing.T) {
 	req, d, _ = g.BeforeLLM(ctx, &LLMHookRequest{Meta: HookMeta{TurnID: "s1", ParentTurnID: "t1"}})
 	if d.Action != HookActionContinue || len(req.Messages) != 0 {
 		t.Fatal("sub-turns get no note")
+	}
+}
+
+func TestDelegationGuardFinalAnswerGateSendsTurnBackOnce(t *testing.T) {
+	g := NewDelegationGuard(DelegationGuardConfig{MaxDirectCalls: 2})
+	var steered []string
+	g.steer = func(sessionKey, _ string, msg providers.Message) error {
+		steered = append(steered, sessionKey+": "+msg.Content)
+		return nil
+	}
+	meta := HookMeta{TurnID: "t1", SessionKey: "s1"}
+	for i := 0; i < 3; i++ {
+		tryTool(g, &ToolCallHookRequest{Meta: meta, Tool: "read_file"})
+	}
+	answer := &LLMHookResponse{Meta: meta, Response: &providers.LLMResponse{Content: "done"}}
+
+	mustContinueAfterLLM(t, g, answer)
+	if len(steered) != 1 || !strings.HasPrefix(steered[0], "s1: [delegation guard] Not done yet") {
+		t.Fatalf("first answer should be sent back once, steered = %q", steered)
+	}
+	mustContinueAfterLLM(t, g, answer)
+	if len(steered) != 1 {
+		t.Fatalf("second answer must go through, steered = %q", steered)
+	}
+}
+
+func TestDelegationGuardFinalAnswerGateLetsGoodTurnsThrough(t *testing.T) {
+	answer := func(meta HookMeta) *LLMHookResponse {
+		return &LLMHookResponse{Meta: meta, Response: &providers.LLMResponse{Content: "done"}}
+	}
+	cases := map[string]func(g *DelegationGuard){
+		"within budget": func(g *DelegationGuard) {
+			for i := 0; i < 2; i++ {
+				tryTool(g, &ToolCallHookRequest{Meta: HookMeta{TurnID: "t1"}, Tool: "read_file"})
+			}
+			mustContinueAfterLLM(t, g, answer(HookMeta{TurnID: "t1"}))
+		},
+		"over budget but spawned": func(g *DelegationGuard) {
+			for _, tool := range []string{"read_file", "read_file", "read_file", "spawn"} {
+				tryTool(g, &ToolCallHookRequest{Meta: HookMeta{TurnID: "t1"}, Tool: tool})
+			}
+			mustContinueAfterLLM(t, g, answer(HookMeta{TurnID: "t1"}))
+		},
+		"sub-turn": func(g *DelegationGuard) {
+			meta := HookMeta{TurnID: "s1", ParentTurnID: "t1"}
+			for i := 0; i < 5; i++ {
+				tryTool(g, &ToolCallHookRequest{Meta: meta, Tool: "read_file"})
+			}
+			mustContinueAfterLLM(t, g, answer(meta))
+		},
+		"tool calls are not an answer": func(g *DelegationGuard) {
+			for i := 0; i < 3; i++ {
+				tryTool(g, &ToolCallHookRequest{Meta: HookMeta{TurnID: "t1"}, Tool: "read_file"})
+			}
+			mustContinueAfterLLM(t, g, &LLMHookResponse{Meta: HookMeta{TurnID: "t1"}, Response: &providers.LLMResponse{
+				ToolCalls: []providers.ToolCall{{ID: "c1", Name: "spawn"}},
+			}})
+		},
+	}
+	for name, run := range cases {
+		g := NewDelegationGuard(DelegationGuardConfig{MaxDirectCalls: 2})
+		steered := 0
+		g.steer = func(string, string, providers.Message) error { steered++; return nil }
+		run(g)
+		if steered != 0 {
+			t.Errorf("%s: gate fired %d times, want 0", name, steered)
+		}
+	}
+	off := false
+	g := NewDelegationGuard(DelegationGuardConfig{MaxDirectCalls: 2, FinalAnswerGate: &off})
+	steered := 0
+	g.steer = func(string, string, providers.Message) error { steered++; return nil }
+	for i := 0; i < 3; i++ {
+		tryTool(g, &ToolCallHookRequest{Meta: HookMeta{TurnID: "t1"}, Tool: "read_file"})
+	}
+	mustContinueAfterLLM(t, g, answer(HookMeta{TurnID: "t1"}))
+	if steered != 0 {
+		t.Errorf("final_answer_gate=false: gate fired")
+	}
+}
+
+// mustContinueAfterLLM runs AfterLLM; the gate never changes the answer itself.
+func mustContinueAfterLLM(t *testing.T, g *DelegationGuard, resp *LLMHookResponse) {
+	t.Helper()
+	if _, d, err := g.AfterLLM(context.Background(), resp); err != nil || d.Action != HookActionContinue {
+		t.Fatalf("AfterLLM = %+v, %v; want continue", d, err)
+	}
+}
+
+// tryTool runs BeforeTool and reports whether the call was allowed.
+func tryTool(g *DelegationGuard, call *ToolCallHookRequest) bool {
+	_, d, err := g.BeforeTool(context.Background(), call)
+	return err == nil && d.normalizedAction() == HookActionContinue
+}
+
+// gateScriptProvider asks for three direct calls, then answers twice.
+type gateScriptProvider struct {
+	calls    int
+	lastSeen []providers.Message
+}
+
+func (p *gateScriptProvider) Chat(
+	_ context.Context,
+	messages []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	p.lastSeen = messages
+	switch p.calls {
+	case 1:
+		var calls []providers.ToolCall
+		for i := 0; i < 3; i++ {
+			calls = append(calls, providers.ToolCall{
+				ID: fmt.Sprintf("call_%d", i), Type: "function", Name: "tool_limit_test_tool",
+				Arguments: map[string]any{"value": "x"},
+			})
+		}
+		return &providers.LLMResponse{ToolCalls: calls}, nil
+	case 2:
+		return &providers.LLMResponse{Content: "first answer"}, nil
+	default:
+		return &providers.LLMResponse{Content: "second answer: delegating makes no sense for this"}, nil
+	}
+}
+
+func (p *gateScriptProvider) GetDefaultModel() string { return "gate-script-model" }
+
+func TestDelegationGuardFinalAnswerGateInTheLoop(t *testing.T) {
+	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+		Workspace: t.TempDir(), ModelName: "test-model", MaxTokens: 4096, MaxToolIterations: 10,
+	}}}
+	provider := &gateScriptProvider{}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al.RegisterTool(&toolLimitTestTool{})
+	if err := al.MountHook(
+		NamedHook(DelegationGuardHookName, NewDelegationGuard(DelegationGuardConfig{MaxDirectCalls: 2})),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := al.ProcessDirectWithChannel(context.Background(), "do it", "gate", "test", "chat1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 3 {
+		t.Fatalf("model calls = %d, want 3 (tools, refused answer, accepted answer)", provider.calls)
+	}
+	if !strings.HasPrefix(response, "second answer") {
+		t.Fatalf("response = %q, want the second answer", response)
+	}
+	last := provider.lastSeen[len(provider.lastSeen)-1]
+	if last.Role != "user" || !strings.Contains(last.Content, "Not done yet") {
+		t.Fatalf("third call should end with the gate note, got %s: %q", last.Role, last.Content)
 	}
 }
