@@ -129,6 +129,8 @@ type PicoChannel struct {
 	deleteMessageFn    func(context.Context, string, string) error
 	// broadcastFn lets tests intercept outbound broadcasts. nil → broadcastToSession.
 	broadcastFn func(chatID string, msg PicoMessage) error
+	// sessionLister answers sessions.list; nil when the gateway did not set one.
+	sessionLister channels.SessionLister
 }
 
 // NewPicoChannel creates a new Pico Protocol channel.
@@ -1211,6 +1213,9 @@ func (c *PicoChannel) handleMessage(pc *picoConn, msg PicoMessage) {
 
 	case TypeMediaSend:
 		c.handleMessageSend(pc, msg)
+
+	case TypeSessionsList:
+		c.handleSessionsList(pc, msg)
 
 	default:
 		errMsg := newError("unknown_type", fmt.Sprintf("unknown message type: %s", msg.Type))

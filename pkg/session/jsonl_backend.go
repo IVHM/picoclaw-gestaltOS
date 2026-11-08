@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -93,6 +94,20 @@ func (b *JSONLBackend) EnsureSessionMetadata(sessionKey string, scope *SessionSc
 			log.Printf("session: promote alias history: %v", err)
 		}
 	}
+}
+
+// GetSessionInfo returns a session's message count and last update time from
+// its metadata. ok is false when the store keeps no metadata for it.
+func (b *JSONLBackend) GetSessionInfo(sessionKey string) (count int, updatedAt time.Time, ok bool) {
+	metaStore, isMeta := b.store.(metaAwareStore)
+	if !isMeta {
+		return 0, time.Time{}, false
+	}
+	meta, err := metaStore.GetSessionMeta(context.Background(), b.resolveSessionKey(sessionKey))
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	return meta.Count, meta.UpdatedAt, true
 }
 
 // GetSessionScope reads structured scope metadata for a session key or alias.

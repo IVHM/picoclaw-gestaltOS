@@ -11,6 +11,8 @@ const (
 	TypeMessageSend = "message.send"
 	TypeMediaSend   = "media.send"
 	TypePing        = "ping"
+	// TypeSessionsList asks for the stored sessions of this channel.
+	TypeSessionsList = "sessions.list"
 
 	// TypeMessageCreate is sent from server to client.
 	TypeMessageCreate = "message.create"
@@ -21,6 +23,8 @@ const (
 	TypeTypingStop    = "typing.stop"
 	TypeError         = "error"
 	TypePong          = "pong"
+	// TypeSessionsListResult answers sessions.list, with the request's id.
+	TypeSessionsListResult = "sessions.list.result"
 
 	// TypeToolResult and TypeSubTurnEvent are activity messages sent from
 	// server to client. They use their own types rather than message.create so

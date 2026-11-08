@@ -91,6 +91,7 @@ type Manager struct {
 	runtimeEvents             runtimeevents.Bus
 	config                    *config.Config
 	mediaStore                media.MediaStore
+	sessionLister             SessionLister
 	dispatchTask              *asyncTask
 	mux                       *dynamicServeMux
 	httpServer                *http.Server
@@ -1014,6 +1015,11 @@ func (m *Manager) initChannel(typeName, channelName string) {
 		if m.mediaStore != nil {
 			if setter, ok := ch.(mediaStoreSetter); ok {
 				setter.SetMediaStore(m.mediaStore)
+			}
+		}
+		if m.sessionLister != nil {
+			if setter, ok := ch.(sessionListerSetter); ok {
+				setter.SetSessionLister(m.sessionLister)
 			}
 		}
 		// Inject PlaceholderRecorder if channel supports it

@@ -21,6 +21,9 @@ func (al *AgentLoop) RegisterTool(tool tools.Tool) {
 
 func (al *AgentLoop) SetChannelManager(cm *channels.Manager) {
 	al.channelManager = cm
+	if cm != nil {
+		cm.SetSessionLister(al.ListChannelSessions)
+	}
 }
 
 func (al *AgentLoop) GetRegistry() *AgentRegistry {
