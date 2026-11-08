@@ -80,6 +80,8 @@ func outboundMessageActivityKind(msg bus.OutboundMessage) string {
 		return MessageKindToolResult
 	case strings.EqualFold(kind, MessageKindSubTurn):
 		return MessageKindSubTurn
+	case strings.EqualFold(kind, MessageKindSubTurnMessage):
+		return MessageKindSubTurnMessage
 	}
 	return ""
 }
@@ -1490,8 +1492,11 @@ func setTurnUsagePayload(payload map[string]any, inputTokens, outputTokens int) 
 // It returns no message ids: activity messages cannot be edited or deleted.
 func (c *PicoChannel) sendActivity(msg bus.OutboundMessage, kind string) ([]string, error) {
 	msgType := TypeToolResult
-	if kind == MessageKindSubTurn {
+	switch kind {
+	case MessageKindSubTurn:
 		msgType = TypeSubTurnEvent
+	case MessageKindSubTurnMessage:
+		msgType = TypeSubTurnMessage
 	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(msg.Context.Raw[kind]), &payload); err != nil {

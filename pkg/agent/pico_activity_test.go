@@ -354,3 +354,121 @@ func TestSpawnSubTurn_EndSaysWhenTheChildTimedOut(t *testing.T) {
 		t.Fatalf("end status = %q reason = %q, want reason %s", end.Status, end.Reason, SubTurnReasonTimeout)
 	}
 }
+
+// childScriptProvider makes a child call one tool, then answer.
+type childScriptProvider struct{ calls int }
+
+func (p *childScriptProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	if p.calls == 1 {
+		return &providers.LLMResponse{
+			ReasoningContent: "I should read it first.",
+			ToolCalls: []providers.ToolCall{{
+				ID: "call_child_1", Type: "function", Name: "tool_limit_test_tool",
+				Arguments: map[string]any{"value": "x"},
+			}},
+			Usage: &providers.UsageInfo{PromptTokens: 100, CompletionTokens: 10},
+		}, nil
+	}
+	return &providers.LLMResponse{
+		Content: "child done",
+		Usage:   &providers.UsageInfo{PromptTokens: 150, CompletionTokens: 5},
+	}, nil
+}
+
+func (p *childScriptProvider) GetDefaultModel() string { return "child-script-model" }
+
+func TestSpawnSubTurn_PublishesChildTranscript(t *testing.T) {
+	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+		Workspace: t.TempDir(), ModelName: "test-model", MaxTokens: 4096, MaxToolIterations: 5,
+	}}}
+	msgBus := bus.NewMessageBus()
+	al := NewAgentLoop(cfg, msgBus, &childScriptProvider{})
+	al.RegisterTool(&toolLimitTestTool{})
+	parentTS := &turnState{
+		ctx: context.Background(), turnID: "turn-1", agentID: "main", channel: "pico",
+		chatID: "pico:session-1", sessionKey: "agent:main:pico:session-1",
+		opts:           processOptions{AllowInterimPicoPublish: true},
+		pendingResults: make(chan *tools.ToolResult, 4),
+		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		session:        &ephemeralSessionStore{}, agent: al.registry.GetDefaultAgent(),
+	}
+	parentTS.opts.Dispatch.InboundContext = &bus.InboundContext{Channel: "pico", ChatID: "pico:session-1"}
+
+	if _, err := spawnSubTurn(context.Background(), al, parentTS, SubTurnConfig{Model: "test-model"}); err != nil {
+		t.Fatalf("spawnSubTurn() error = %v", err)
+	}
+
+	var got []PicoSubTurnMessage
+	for {
+		msg := readOutbound(t, msgBus)
+		if msg.Context.Raw[metadataKeyMessageKind] == messageKindSubTurnMessage {
+			var m PicoSubTurnMessage
+			if err := json.Unmarshal([]byte(msg.Context.Raw[metadataKeySubTurnMsg]), &m); err != nil {
+				t.Fatal(err)
+			}
+			if msg.ChatID != "pico:session-1" {
+				t.Fatalf("subturn message sent to %q", msg.ChatID)
+			}
+			got = append(got, m)
+			continue
+		}
+		if msg.Context.Raw[metadataKeyMessageKind] == messageKindSubTurn &&
+			strings.Contains(msg.Context.Raw[metadataKeySubTurn], `"phase":"end"`) {
+			break
+		}
+	}
+	kinds := make([]string, 0, len(got))
+	for i, m := range got {
+		kinds = append(kinds, m.Kind)
+		if m.Seq != i+1 || !strings.HasPrefix(m.ChildTurnID, "subturn-") || m.ParentTurnID != "turn-1" || m.Depth != 1 {
+			t.Fatalf("frame %d ids/seq: %+v", i, m)
+		}
+	}
+	want := []string{SubTurnMessageThought, SubTurnMessageToolCalls, SubTurnMessageToolResult, SubTurnMessageText}
+	if strings.Join(kinds, ",") != strings.Join(want, ",") {
+		t.Fatalf("kinds = %v, want %v", kinds, want)
+	}
+	if got[1].ToolCalls[0].ID != "call_child_1" || got[2].ToolCallID != "call_child_1" ||
+		got[2].Status != ToolResultStatusOK {
+		t.Fatalf("call/result pairing: %+v / %+v", got[1], got[2])
+	}
+	if got[3].Content != "child done" || got[3].TurnUsage == nil || got[3].TurnUsage.InputTokens != 250 {
+		t.Fatalf("final text frame = %+v", got[3])
+	}
+}
+
+func TestPublishPicoSubTurnMessage_CapsFramesPerChild(t *testing.T) {
+	al, msgBus := newSubTurnMessageTestLoop(t)
+	child := &turnState{
+		turnID: "subturn-9", parentTurnID: "turn-1", depth: 1, agentID: "main",
+		channel: "pico", chatID: "pico:session-1", agent: al.registry.GetDefaultAgent(),
+	}
+	go func() {
+		for i := 0; i < picoSubTurnMessageCap+5; i++ {
+			al.publishPicoSubTurnMessage(child, PicoSubTurnMessage{Kind: SubTurnMessageText, Content: "x"})
+		}
+	}()
+	var last PicoSubTurnMessage
+	for n := 0; n < picoSubTurnMessageCap+1; n++ {
+		msg := readOutbound(t, msgBus)
+		_ = json.Unmarshal([]byte(msg.Context.Raw[metadataKeySubTurnMsg]), &last)
+	}
+	if last.Kind != SubTurnMessageOmitted || last.Seq != picoSubTurnMessageCap+1 {
+		t.Fatalf("frame after the cap = %+v, want one omitted notice", last)
+	}
+	expectNoOutbound(t, msgBus)
+}
+
+func newSubTurnMessageTestLoop(t *testing.T) (*AgentLoop, *bus.MessageBus) {
+	t.Helper()
+	al, _, msgBus, _, cleanup := newTestAgentLoop(t)
+	t.Cleanup(cleanup)
+	return al, msgBus
+}

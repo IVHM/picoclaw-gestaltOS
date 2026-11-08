@@ -1248,3 +1248,42 @@ func TestSetTurnPayload_SkipsMissingOrZeroUsage(t *testing.T) {
 		t.Fatalf("payload = %#v, want empty", payload)
 	}
 }
+
+func TestSend_SubTurnMessageUsesOwnType(t *testing.T) {
+	ch := newTestPicoChannel(t)
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	clientConn, received, cleanup := newTestPicoWebSocket(t)
+	defer cleanup()
+	ch.addConnForTest(&picoConn{id: "conn-1", conn: clientConn, sessionID: "sess-1"})
+
+	if _, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID: "pico:sess-1",
+		Context: bus.InboundContext{
+			Channel: "pico",
+			ChatID:  "pico:sess-1",
+			Raw: map[string]string{
+				"message_kind":            MessageKindSubTurnMessage,
+				MessageKindSubTurnMessage: `{"child_turn_id":"subturn-1","parent_turn_id":"main-turn-1","seq":1,"kind":"text","content":"hi","ts":1}`,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Send(subturn_message) error = %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if msg.Type != TypeSubTurnMessage {
+			t.Fatalf("type = %q, want %q", msg.Type, TypeSubTurnMessage)
+		}
+		if msg.Payload["child_turn_id"] != "subturn-1" || msg.Payload["kind"] != "text" ||
+			msg.Payload["content"] != "hi" {
+			t.Fatalf("payload = %#v", msg.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected subturn.message")
+	}
+}

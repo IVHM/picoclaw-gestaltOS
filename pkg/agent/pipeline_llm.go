@@ -578,6 +578,13 @@ func (p *Pipeline) CallLLM(
 			al.targetReasoningChannelID(ts.channel),
 		)
 	}
+	al.publishPicoSubTurnLLMResponse(
+		ts,
+		reasoningContent,
+		exec.response.Content,
+		exec.llmModelName,
+		exec.response.ToolCalls,
+	)
 	al.emitEvent(
 		runtimeevents.KindAgentLLMResponse,
 		ts.eventMeta("runTurn", "turn.llm.response"),

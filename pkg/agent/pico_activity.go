@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -22,9 +24,12 @@ import (
 const (
 	messageKindToolResult = "tool_result"
 	messageKindSubTurn    = "subturn"
-	metadataKeyToolResult = "tool_result"
-	metadataKeySubTurn    = "subturn"
-	metadataKeyTurnID     = "turn_id"
+	// messageKindSubTurnMessage carries one step of a child's own transcript.
+	messageKindSubTurnMessage = "subturn_message"
+	metadataKeyToolResult     = "tool_result"
+	metadataKeySubTurn        = "subturn"
+	metadataKeySubTurnMsg     = "subturn_message"
+	metadataKeyTurnID         = "turn_id"
 	// Prompt and completion tokens summed over the turn so far (all LLM calls,
 	// tool loop included). Sent on tool_calls and on the final answer.
 	metadataKeyTurnInputTokens  = "turn_input_tokens"
@@ -43,6 +48,18 @@ const (
 	SubTurnPhaseEnd             = "end"
 	SubTurnPhaseResultDelivered = "result_delivered"
 	SubTurnPhaseOrphan          = "orphan"
+
+	// SubTurnMessageThought and the kinds below are the values of a
+	// subturn.message frame's kind.
+	SubTurnMessageThought    = "thought"
+	SubTurnMessageText       = "text"
+	SubTurnMessageToolCalls  = "tool_calls"
+	SubTurnMessageToolResult = "tool_result"
+	SubTurnMessageOmitted    = "omitted"
+
+	// picoSubTurnMessageCap is how many transcript frames one child may send.
+	// After it, one "omitted" frame is sent and the rest are dropped.
+	picoSubTurnMessageCap = 200
 
 	// SubTurnReasonMaxToolIterations is the end frame's reason when the child
 	// ran out of tool iterations instead of finishing.
@@ -88,6 +105,35 @@ type PicoSubTurn struct {
 	TimestampMilli int64  `json:"ts"`
 }
 
+// PicoTurnUsage is a running token total, as in turn_usage.
+type PicoTurnUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+// PicoSubTurnMessage is one step of a child's own transcript, sent to the
+// parent's pico chat as it happens (subturn.message).
+type PicoSubTurnMessage struct {
+	ChildTurnID    string                  `json:"child_turn_id"`
+	ParentTurnID   string                  `json:"parent_turn_id,omitempty"`
+	Depth          int                     `json:"depth,omitempty"`
+	Seq            int                     `json:"seq"`
+	Kind           string                  `json:"kind"`
+	Content        string                  `json:"content,omitempty"`
+	ContentLen     int                     `json:"content_len,omitempty"`
+	Truncated      bool                    `json:"truncated,omitempty"`
+	ToolCalls      []utils.VisibleToolCall `json:"tool_calls,omitempty"`
+	ToolCallID     string                  `json:"tool_call_id,omitempty"`
+	Tool           string                  `json:"tool,omitempty"`
+	Status         string                  `json:"status,omitempty"`
+	IsError        bool                    `json:"is_error,omitempty"`
+	DurationMs     int64                   `json:"duration_ms,omitempty"`
+	ModelName      string                  `json:"model_name,omitempty"`
+	TurnUsage      *PicoTurnUsage          `json:"turn_usage,omitempty"`
+	TimestampMilli int64                   `json:"ts"`
+}
+
 func picoToolResultStatus(isError bool) string {
 	if isError {
 		return ToolResultStatusError
@@ -112,11 +158,28 @@ func (al *AgentLoop) publishPicoToolResult(
 	duration time.Duration,
 	async bool,
 ) {
-	if al == nil || al.bus == nil || !shouldPublishPicoToolResult(ts) || strings.TrimSpace(toolCallID) == "" {
+	if al == nil || al.bus == nil || strings.TrimSpace(toolCallID) == "" {
+		return
+	}
+	clipped := utils.Truncate(content, picoToolResultMaxContentRunes)
+	if isPicoSubTurn(ts) {
+		al.publishPicoSubTurnMessage(ts, PicoSubTurnMessage{
+			Kind:       SubTurnMessageToolResult,
+			Content:    clipped,
+			ContentLen: len([]rune(content)),
+			Truncated:  clipped != content,
+			ToolCallID: toolCallID,
+			Tool:       toolName,
+			Status:     status,
+			IsError:    status != ToolResultStatusOK,
+			DurationMs: duration.Milliseconds(),
+		})
+		return
+	}
+	if !shouldPublishPicoToolResult(ts) {
 		return
 	}
 
-	clipped := utils.Truncate(content, picoToolResultMaxContentRunes)
 	snap := ts.snapshot()
 	payload := PicoToolResult{
 		ToolCallID:   toolCallID,
@@ -215,4 +278,74 @@ func subTurnEndReason(err, ctxErr error, limit string) string {
 	default:
 		return limit
 	}
+}
+
+// isPicoSubTurn reports a child turn whose root chat is a pico chat.
+func isPicoSubTurn(ts *turnState) bool {
+	return ts != nil && ts.parentTurnID != "" && ts.channel == "pico" && ts.chatID != ""
+}
+
+// publishPicoSubTurnLLMResponse sends a child's model response as up to three
+// subturn.message frames: its thought, its text and its tool calls.
+func (al *AgentLoop) publishPicoSubTurnLLMResponse(
+	ts *turnState,
+	reasoning, content, modelName string,
+	toolCalls []providers.ToolCall,
+) {
+	if !isPicoSubTurn(ts) {
+		return
+	}
+	for _, step := range []struct{ kind, text string }{
+		{SubTurnMessageThought, reasoning},
+		{SubTurnMessageText, content},
+	} {
+		if strings.TrimSpace(step.text) == "" {
+			continue
+		}
+		clipped := utils.Truncate(step.text, picoToolResultMaxContentRunes)
+		al.publishPicoSubTurnMessage(ts, PicoSubTurnMessage{
+			Kind: step.kind, Content: clipped, ContentLen: len([]rune(step.text)),
+			Truncated: clipped != step.text, ModelName: modelName,
+		})
+	}
+	if len(toolCalls) > 0 {
+		calls := utils.BuildVisibleToolCalls(toolCalls, al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength())
+		if len(calls) > 0 {
+			al.publishPicoSubTurnMessage(ts, PicoSubTurnMessage{
+				Kind: SubTurnMessageToolCalls, ToolCalls: calls, ModelName: modelName,
+			})
+		}
+	}
+}
+
+// publishPicoSubTurnMessage stamps a child transcript frame (ids, sequence,
+// running token totals) and sends it, up to picoSubTurnMessageCap per child.
+func (al *AgentLoop) publishPicoSubTurnMessage(ts *turnState, msg PicoSubTurnMessage) {
+	if al == nil || al.bus == nil || !isPicoSubTurn(ts) {
+		return
+	}
+	seq := ts.nextSubTurnMessageSeq()
+	switch {
+	case seq > picoSubTurnMessageCap+1:
+		return
+	case seq == picoSubTurnMessageCap+1:
+		msg = PicoSubTurnMessage{
+			Kind:    SubTurnMessageOmitted,
+			Content: fmt.Sprintf("further messages of this sub-turn are not sent (cap %d)", picoSubTurnMessageCap),
+		}
+	}
+	snap := ts.snapshot()
+	msg.ChildTurnID = ts.subTurnID
+	if msg.ChildTurnID == "" {
+		msg.ChildTurnID = snap.TurnID
+	}
+	msg.ParentTurnID = snap.ParentTurnID
+	msg.Depth = ts.depth
+	msg.Seq = seq
+	if in, out := ts.TokenTotals(); in > 0 || out > 0 {
+		msg.TurnUsage = &PicoTurnUsage{InputTokens: in, OutputTokens: out, TotalTokens: in + out}
+	}
+	msg.TimestampMilli = time.Now().UnixMilli()
+	// Children can outlive their parent's context; publish on a fresh one.
+	al.publishPicoActivity(context.Background(), ts, messageKindSubTurnMessage, metadataKeySubTurnMsg, msg)
 }

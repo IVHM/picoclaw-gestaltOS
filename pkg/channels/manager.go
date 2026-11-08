@@ -186,7 +186,8 @@ func outboundMessageIsActivity(msg bus.OutboundMessage) bool {
 		return false
 	}
 	kind := strings.TrimSpace(msg.Context.Raw["message_kind"])
-	return strings.EqualFold(kind, "tool_result") || strings.EqualFold(kind, "subturn")
+	return strings.EqualFold(kind, "tool_result") || strings.EqualFold(kind, "subturn") ||
+		strings.EqualFold(kind, "subturn_message")
 }
 
 func outboundMessageHasAuxiliaryKind(msg bus.OutboundMessage) bool {

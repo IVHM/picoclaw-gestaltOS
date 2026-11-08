@@ -412,6 +412,7 @@ func spawnSubTurn(
 	childTS.critical = cfg.Critical
 	childTS.depth = parentTS.depth + 1
 	childTS.parentTurnID = parentTS.turnID
+	childTS.subTurnID = childID
 	childTS.parentTurnState = parentTS
 	childTS.pendingResults = make(chan *tools.ToolResult, 16)
 	childTS.concurrencySem = make(chan struct{}, rtCfg.maxConcurrent)

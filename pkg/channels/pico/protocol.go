@@ -28,6 +28,8 @@ const (
 	// rendering or re-ingesting them.
 	TypeToolResult   = "tool.result"
 	TypeSubTurnEvent = "subturn.event"
+	// TypeSubTurnMessage carries one step of a child's own transcript.
+	TypeSubTurnMessage = "subturn.message"
 
 	PayloadKeyContent     = "content"
 	PayloadKeyThought     = "thought"
@@ -43,6 +45,8 @@ const (
 	MessageKindToolCalls  = "tool_calls"
 	MessageKindToolResult = "tool_result"
 	MessageKindSubTurn    = "subturn"
+	// MessageKindSubTurnMessage is the outbound kind behind subturn.message.
+	MessageKindSubTurnMessage = "subturn_message"
 )
 
 // PicoMessage is the wire format for all Pico Protocol messages.

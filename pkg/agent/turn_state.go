@@ -254,6 +254,8 @@ type turnState struct {
 	lastFinishReason string               // Last LLM finish_reason
 	lastUsage        *providers.UsageInfo // Last LLM usage info
 	limitReason      string               // set when the turn stopped at a limit (e.g. max_tool_iterations)
+	subTurnMsgSeq    int                  // subturn.message frames sent for this child
+	subTurnID        string               // the child's subturn-N id, as in subturn.event (children only)
 	promptTokens     int                  // Prompt tokens summed over this turn's LLM calls
 	completionTokens int                  // Completion tokens summed over this turn's LLM calls
 
@@ -907,6 +909,14 @@ func (ts *turnState) setLimitReason(reason string) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.limitReason = reason
+}
+
+// nextSubTurnMessageSeq numbers this child's subturn.message frames from 1.
+func (ts *turnState) nextSubTurnMessageSeq() int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.subTurnMsgSeq++
+	return ts.subTurnMsgSeq
 }
 
 // LimitReason is the limit the turn stopped at, or "" if it finished.
