@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -217,5 +219,45 @@ func TestDelegationGuardFinalAnswerGateInTheLoop(t *testing.T) {
 	last := provider.lastSeen[len(provider.lastSeen)-1]
 	if last.Role != "user" || !strings.Contains(last.Content, "Not done yet") {
 		t.Fatalf("third call should end with the gate note, got %s: %q", last.Role, last.Content)
+	}
+}
+
+func TestDelegationGuardSubagentPrompt(t *testing.T) {
+	ctx := context.Background()
+	g := NewDelegationGuard(DelegationGuardConfig{SubagentPrompt: "  You are a sub-agent: do the task yourself.  "})
+	req, d, _ := g.BeforeLLM(ctx, &LLMHookRequest{Meta: HookMeta{TurnID: "c1", ParentTurnID: "t1"}})
+	if d.Action != HookActionModify || len(req.Messages) != 1 ||
+		req.Messages[0].Content != "You are a sub-agent: do the task yourself." || req.Messages[0].Role != "user" {
+		t.Fatalf("sub-turn note: %+v %+v", d, req.Messages)
+	}
+	// The main turn still gets the budget note, not the sub-agent one.
+	req, _, _ = g.BeforeLLM(ctx, &LLMHookRequest{Meta: HookMeta{TurnID: "t1"}})
+	if len(req.Messages) != 1 || !strings.Contains(req.Messages[0].Content, "Direct tool budget") {
+		t.Fatalf("main turn: %+v", req.Messages)
+	}
+	// Without a prompt, sub-turns are left alone.
+	g = NewDelegationGuard(DelegationGuardConfig{})
+	req, d, _ = g.BeforeLLM(ctx, &LLMHookRequest{Meta: HookMeta{TurnID: "c1", ParentTurnID: "t1"}})
+	if d.Action != HookActionContinue || len(req.Messages) != 0 {
+		t.Fatalf("no prompt: %+v %+v", d, req.Messages)
+	}
+}
+
+func TestDelegationGuardSubagentPromptFile(t *testing.T) {
+	path := t.TempDir() + "/SUBAGENT.md"
+	if err := os.WriteFile(path, []byte("Do it yourself.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"subagent_prompt_file": path})
+	hook, err := newDelegationGuardFromSpec(context.Background(), config.BuiltinHookConfig{Config: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := hook.(*DelegationGuard); g.subNote != "Do it yourself." {
+		t.Fatalf("subNote = %q", g.subNote)
+	}
+	raw, _ = json.Marshal(map[string]any{"subagent_prompt_file": path + ".missing"})
+	if _, err := newDelegationGuardFromSpec(context.Background(), config.BuiltinHookConfig{Config: raw}); err == nil {
+		t.Fatal("a missing prompt file should fail the hook config")
 	}
 }

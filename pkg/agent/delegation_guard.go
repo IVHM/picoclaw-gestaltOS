@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -30,6 +31,11 @@ type DelegationGuardConfig struct {
 	// FinalAnswerGate sends a top-level turn back once when it tries to answer
 	// after going over the direct budget without spawning any sub-agent.
 	FinalAnswerGate *bool `json:"final_answer_gate"`
+	// SubagentPrompt is a note added before each model call of a sub-turn, e.g.
+	// "you are a sub-agent: do the task yourself". SubagentPromptFile reads it
+	// from a file instead (read once, when the hook is built). Empty: no note.
+	SubagentPrompt     string `json:"subagent_prompt"`
+	SubagentPromptFile string `json:"subagent_prompt_file"`
 }
 
 // DelegationGuard keeps top-level turns to a small direct tool budget so that
@@ -39,6 +45,7 @@ type DelegationGuard struct {
 	delegate map[string]bool
 	remind   bool
 	gate     bool
+	subNote  string
 
 	mu    sync.Mutex
 	turns map[string]*delegationTurn
@@ -67,6 +74,13 @@ func newDelegationGuardFromSpec(_ context.Context, spec config.BuiltinHookConfig
 			return nil, fmt.Errorf("delegation_guard config: %w", err)
 		}
 	}
+	if cfg.SubagentPromptFile != "" {
+		data, err := os.ReadFile(cfg.SubagentPromptFile)
+		if err != nil {
+			return nil, fmt.Errorf("delegation_guard subagent_prompt_file: %w", err)
+		}
+		cfg.SubagentPrompt = string(data)
+	}
 	return NewDelegationGuard(cfg), nil
 }
 
@@ -82,6 +96,7 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 		delegate: map[string]bool{},
 		remind:   cfg.Remind == nil || *cfg.Remind,
 		gate:     cfg.FinalAnswerGate == nil || *cfg.FinalAnswerGate,
+		subNote:  strings.TrimSpace(cfg.SubagentPrompt),
 		turns:    map[string]*delegationTurn{},
 	}
 	for _, name := range cfg.DelegateTools {
@@ -118,7 +133,18 @@ func (g *DelegationGuard) turn(turnID string) *delegationTurn {
 }
 
 func (g *DelegationGuard) BeforeLLM(_ context.Context, req *LLMHookRequest) (*LLMHookRequest, HookDecision, error) {
-	if !g.remind || req == nil || !g.topLevel(req.Meta) {
+	if req == nil {
+		return req, HookDecision{Action: HookActionContinue}, nil
+	}
+	if req.Meta.ParentTurnID != "" {
+		// A sub-turn sees the workspace's coordinator rules too; this note tells it to do its task.
+		if g.subNote == "" {
+			return req, HookDecision{Action: HookActionContinue}, nil
+		}
+		req.Messages = append(req.Messages, providers.Message{Role: "user", Content: g.subNote})
+		return req, HookDecision{Action: HookActionModify}, nil
+	}
+	if !g.remind || !g.topLevel(req.Meta) {
 		return req, HookDecision{Action: HookActionContinue}, nil
 	}
 	g.mu.Lock()
