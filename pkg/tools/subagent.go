@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -414,6 +416,9 @@ Task: %s`,
 			task,
 		)
 	}
+	if IsBuiltTaskPrompt(task) {
+		systemPrompt = task // a context-builder prompt is passed exactly as built
+	}
 
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {
@@ -458,4 +463,15 @@ Task: %s`,
 
 	// Fallback: spawner not configured
 	return ErrorResult("Subagent manager not configured").WithError(fmt.Errorf("spawner not set"))
+}
+
+// builtPromptLastLine is the line a context-builder task prompt ends with.
+var builtPromptLastLine = regexp.MustCompile(`^bundle_id CB-[0-9a-f]{10}\b`)
+
+// IsBuiltTaskPrompt reports a task that is a context-builder prompt (its last
+// non-empty line is "bundle_id CB-<10 hex>…"). Such a task is handed to the
+// sub-agent as is, without the "You are a subagent…" lead-in.
+func IsBuiltTaskPrompt(task string) bool {
+	lines := strings.Split(strings.TrimRight(task, " \t\r\n"), "\n")
+	return builtPromptLastLine.MatchString(strings.TrimSpace(lines[len(lines)-1]))
 }

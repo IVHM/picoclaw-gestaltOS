@@ -124,6 +124,9 @@ Task: %s`,
 			task,
 		)
 	}
+	if IsBuiltTaskPrompt(task) {
+		systemPrompt = task // a context-builder prompt is passed exactly as built
+	}
 
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {
