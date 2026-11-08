@@ -48,6 +48,10 @@ type DelegationGuardConfig struct {
 	// ContextBuildTools are the tool names whose result carries the built
 	// prompt. Default: any tool whose name contains "context_build".
 	ContextBuildTools []string `json:"context_build_tools"`
+	// HideFromMain lists tools the main agent does not get (e.g. exec,
+	// write_file), so delegating is the easy path. Sub-agents keep them.
+	// Empty by default.
+	HideFromMain []string `json:"hide_from_main"`
 }
 
 // DelegationGuard keeps top-level turns to a small direct tool budget so that
@@ -61,6 +65,7 @@ type DelegationGuard struct {
 	subNote    string
 	spawnGate  bool
 	buildTools map[string]bool
+	hidden     map[string]bool
 
 	mu    sync.Mutex
 	turns map[string]*delegationTurn
@@ -126,6 +131,7 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 		claims:     cfg.ClaimCheck == nil || *cfg.ClaimCheck,
 		spawnGate:  cfg.SpawnRequiresContextBuild,
 		buildTools: map[string]bool{},
+		hidden:     map[string]bool{},
 		max:        cfg.MaxDirectCalls,
 		delegate:   map[string]bool{},
 		remind:     cfg.Remind == nil || *cfg.Remind,
@@ -138,6 +144,11 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 	}
 	for _, name := range cfg.ContextBuildTools {
 		g.buildTools[name] = true
+	}
+	for _, name := range cfg.HideFromMain {
+		if !g.delegate[name] {
+			g.hidden[name] = true // a delegating tool is never hidden
+		}
 	}
 	return g
 }
@@ -181,8 +192,24 @@ func (g *DelegationGuard) BeforeLLM(_ context.Context, req *LLMHookRequest) (*LL
 		req.Messages = append(req.Messages, providers.Message{Role: "user", Content: g.subNote})
 		return req, HookDecision{Action: HookActionModify}, nil
 	}
-	if !g.remind || !g.topLevel(req.Meta) {
+	if !g.topLevel(req.Meta) {
 		return req, HookDecision{Action: HookActionContinue}, nil
+	}
+	action := HookActionContinue
+	if len(g.hidden) > 0 {
+		kept := req.Tools[:0:0]
+		for _, def := range req.Tools {
+			if !g.hidden[def.Function.Name] {
+				kept = append(kept, def)
+			}
+		}
+		if len(kept) != len(req.Tools) {
+			req.Tools = kept
+			action = HookActionModify
+		}
+	}
+	if !g.remind {
+		return req, HookDecision{Action: action}, nil
 	}
 	g.mu.Lock()
 	t, ok := g.turns[req.Meta.TurnID]
@@ -270,6 +297,10 @@ func (g *DelegationGuard) BeforeTool(
 	}
 	if !g.topLevel(call.Meta) {
 		return call, HookDecision{Action: HookActionContinue}, nil
+	}
+	if g.hidden[call.Tool] {
+		return call, HookDecision{Action: HookActionDenyTool, Reason: fmt.Sprintf(
+			"%s is not available to the main agent; delegate this work with the spawn tool", call.Tool)}, nil
 	}
 	g.mu.Lock()
 	t := g.turn(call.Meta.TurnID)

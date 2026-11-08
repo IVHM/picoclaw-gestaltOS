@@ -399,7 +399,8 @@ func (hm *HookManager) applyBeforeLLMControls(
 		})
 		next.Messages = cloneProviderMessages(current.Messages)
 	}
-	if !llmHookToolDefinitionsUnchanged(current.Tools, next.Tools) {
+	if !llmHookToolDefinitionsUnchanged(current.Tools, next.Tools) &&
+		!llmHookToolDefinitionsOnlyRemoved(current.Tools, next.Tools) {
 		logger.WarnCF("hooks", "Hook attempted to modify tool definitions; preserving original tools", map[string]any{
 			"hook": hookName,
 		})
@@ -436,6 +437,25 @@ func systemMessageFingerprints(messages []providers.Message) []systemMessageFing
 
 func llmHookToolDefinitionsUnchanged(before, after []providers.ToolDefinition) bool {
 	return reflect.DeepEqual(providerVisibleToolDefinitions(before), providerVisibleToolDefinitions(after))
+}
+
+// llmHookToolDefinitionsOnlyRemoved reports that after keeps some of before's
+// tools, unchanged and in order, and adds none. A hook may hide tools from a
+// call that way; it may never add or alter one.
+func llmHookToolDefinitionsOnlyRemoved(before, after []providers.ToolDefinition) bool {
+	b := providerVisibleToolDefinitions(before)
+	a := providerVisibleToolDefinitions(after)
+	i := 0
+	for _, def := range a {
+		for i < len(b) && !reflect.DeepEqual(b[i], def) {
+			i++
+		}
+		if i == len(b) {
+			return false
+		}
+		i++
+	}
+	return true
 }
 
 func providerVisibleMessage(msg providers.Message) providers.Message {

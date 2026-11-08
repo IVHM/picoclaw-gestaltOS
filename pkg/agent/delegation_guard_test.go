@@ -367,3 +367,69 @@ func TestDelegationGuardSpawnGate(t *testing.T) {
 		}
 	}
 }
+
+func TestDelegationGuardHideFromMain(t *testing.T) {
+	ctx := context.Background()
+	defs := func(names ...string) []providers.ToolDefinition {
+		out := make([]providers.ToolDefinition, 0, len(names))
+		for _, n := range names {
+			out = append(
+				out,
+				providers.ToolDefinition{Type: "function", Function: providers.ToolFunctionDefinition{Name: n}},
+			)
+		}
+		return out
+	}
+	names := func(ds []providers.ToolDefinition) string {
+		out := make([]string, 0, len(ds))
+		for _, d := range ds {
+			out = append(out, d.Function.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	g := NewDelegationGuard(DelegationGuardConfig{HideFromMain: []string{"exec", "write_file", "spawn"}})
+	req, d, _ := g.BeforeLLM(
+		ctx,
+		&LLMHookRequest{Meta: HookMeta{TurnID: "t1"}, Tools: defs("read_file", "exec", "spawn", "write_file")},
+	)
+	if d.Action != HookActionModify || names(req.Tools) != "read_file,spawn" {
+		t.Fatalf("main turn tools = %s (%s); spawn must never be hidden", names(req.Tools), d.Action)
+	}
+	if tryTool(g, &ToolCallHookRequest{Meta: HookMeta{TurnID: "t1"}, Tool: "exec"}) {
+		t.Fatal("a hidden tool called anyway must be denied in the main turn")
+	}
+	sub := HookMeta{TurnID: "s1", ParentTurnID: "t1"}
+	req, _, _ = g.BeforeLLM(ctx, &LLMHookRequest{Meta: sub, Tools: defs("read_file", "exec")})
+	if names(req.Tools) != "read_file,exec" || !tryTool(g, &ToolCallHookRequest{Meta: sub, Tool: "exec"}) {
+		t.Fatal("sub-agents keep every tool")
+	}
+}
+
+func TestHookManagerLetsHooksOnlyRemoveTools(t *testing.T) {
+	hm := &HookManager{}
+	def := func(n, desc string) providers.ToolDefinition {
+		return providers.ToolDefinition{
+			Type:     "function",
+			Function: providers.ToolFunctionDefinition{Name: n, Description: desc},
+		}
+	}
+	cur := &LLMHookRequest{Tools: []providers.ToolDefinition{def("a", ""), def("b", ""), def("c", "")}}
+	got := hm.applyBeforeLLMControls(
+		"h",
+		cur,
+		&LLMHookRequest{Tools: []providers.ToolDefinition{def("a", ""), def("c", "")}},
+	)
+	if len(got.Tools) != 2 {
+		t.Fatalf("removal should be kept, got %d tools", len(got.Tools))
+	}
+	for _, next := range [][]providers.ToolDefinition{
+		{def("a", ""), def("b", ""), def("c", ""), def("d", "")}, // added
+		{def("a", "changed"), def("b", ""), def("c", "")},        // altered
+		{def("c", ""), def("a", "")},                             // reordered
+	} {
+		got = hm.applyBeforeLLMControls("h", cur, &LLMHookRequest{Tools: next})
+		if len(got.Tools) != 3 || got.Tools[0].Function.Description != "" {
+			t.Fatalf("change %v should be reverted, got %v", next, got.Tools)
+		}
+	}
+}
