@@ -40,17 +40,27 @@ type DelegationGuardConfig struct {
 	// ClaimCheck sends a top-level turn back once when its answer says it
 	// dispatched sub-agents but the turn made no spawn call.
 	ClaimCheck *bool `json:"claim_check"`
+	// SpawnRequiresContextBuild refuses spawn/subagent unless the task is a
+	// context-builder prompt: a TI- ticket id and a last line "bundle_id CB-…",
+	// and, when this turn ran context_build, exactly the prompt it returned.
+	// A label starting "probe-" is let through. Off by default.
+	SpawnRequiresContextBuild bool `json:"spawn_requires_context_build"`
+	// ContextBuildTools are the tool names whose result carries the built
+	// prompt. Default: any tool whose name contains "context_build".
+	ContextBuildTools []string `json:"context_build_tools"`
 }
 
 // DelegationGuard keeps top-level turns to a small direct tool budget so that
 // multi-step work goes to sub-agents. Sub-turns are not restricted.
 type DelegationGuard struct {
-	max      int
-	delegate map[string]bool
-	remind   bool
-	gate     bool
-	claims   bool
-	subNote  string
+	max        int
+	delegate   map[string]bool
+	remind     bool
+	gate       bool
+	claims     bool
+	subNote    string
+	spawnGate  bool
+	buildTools map[string]bool
 
 	mu    sync.Mutex
 	turns map[string]*delegationTurn
@@ -63,11 +73,20 @@ type DelegationGuard struct {
 
 // delegationTurn is what the guard knows about one top-level turn.
 type delegationTurn struct {
-	attempts int  // direct calls tried, denied ones included
-	spawned  bool // a delegating tool was called
-	gated    bool // the final-answer gate already sent this turn back
-	claimed  bool // the claim check already sent this turn back
+	attempts int      // direct calls tried, denied ones included
+	spawned  bool     // a delegating tool was called
+	gated    bool     // the final-answer gate already sent this turn back
+	claimed  bool     // the claim check already sent this turn back
+	prompts  []string // prompts context_build returned in this turn
 }
+
+// SpawnGateRefusal is the deny reason of the spawn gate (same wording as OpenClaw's spawn-gate).
+const SpawnGateRefusal = "Spawn refused: file TI-*, context_build, pass exact prompt."
+
+var (
+	spawnTicketID   = regexp.MustCompile(`\bTI-[A-Za-z0-9][A-Za-z0-9-]*`)
+	spawnBundleLine = regexp.MustCompile(`^bundle_id CB-[0-9a-f]{10}\b`)
+)
 
 // delegationClaim matches an answer that says sub-agents were sent off ("both sub-agents are
 // dispatched", "I've spawned two subagents", "sub-agents are now running").
@@ -104,16 +123,21 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 		cfg.DelegateTools = []string{"spawn", "spawn_status", "subagent"}
 	}
 	g := &DelegationGuard{
-		claims:   cfg.ClaimCheck == nil || *cfg.ClaimCheck,
-		max:      cfg.MaxDirectCalls,
-		delegate: map[string]bool{},
-		remind:   cfg.Remind == nil || *cfg.Remind,
-		gate:     cfg.FinalAnswerGate == nil || *cfg.FinalAnswerGate,
-		subNote:  strings.TrimSpace(cfg.SubagentPrompt),
-		turns:    map[string]*delegationTurn{},
+		claims:     cfg.ClaimCheck == nil || *cfg.ClaimCheck,
+		spawnGate:  cfg.SpawnRequiresContextBuild,
+		buildTools: map[string]bool{},
+		max:        cfg.MaxDirectCalls,
+		delegate:   map[string]bool{},
+		remind:     cfg.Remind == nil || *cfg.Remind,
+		gate:       cfg.FinalAnswerGate == nil || *cfg.FinalAnswerGate,
+		subNote:    strings.TrimSpace(cfg.SubagentPrompt),
+		turns:      map[string]*delegationTurn{},
 	}
 	for _, name := range cfg.DelegateTools {
 		g.delegate[name] = true
+	}
+	for _, name := range cfg.ContextBuildTools {
+		g.buildTools[name] = true
 	}
 	return g
 }
@@ -238,7 +262,13 @@ func (g *DelegationGuard) BeforeTool(
 	_ context.Context,
 	call *ToolCallHookRequest,
 ) (*ToolCallHookRequest, HookDecision, error) {
-	if call == nil || !g.topLevel(call.Meta) {
+	if call == nil {
+		return call, HookDecision{Action: HookActionContinue}, nil
+	}
+	if g.spawnGate && (call.Tool == "spawn" || call.Tool == "subagent") && !g.spawnAllowed(call) {
+		return call, HookDecision{Action: HookActionDenyTool, Reason: SpawnGateRefusal}, nil
+	}
+	if !g.topLevel(call.Meta) {
 		return call, HookDecision{Action: HookActionContinue}, nil
 	}
 	g.mu.Lock()
@@ -265,7 +295,66 @@ func (g *DelegationGuard) AfterTool(
 	_ context.Context,
 	result *ToolResultHookResponse,
 ) (*ToolResultHookResponse, HookDecision, error) {
+	if g.spawnGate && result != nil && result.Result != nil && !result.Result.IsError && g.isContextBuild(result.Tool) {
+		if prompt := builtPrompt(result.Result.ForLLM); prompt != "" {
+			g.mu.Lock()
+			t := g.turn(result.Meta.TurnID)
+			t.prompts = append(t.prompts, prompt)
+			g.mu.Unlock()
+		}
+	}
 	return result, HookDecision{Action: HookActionContinue}, nil
+}
+
+func (g *DelegationGuard) isContextBuild(tool string) bool {
+	if len(g.buildTools) > 0 {
+		return g.buildTools[tool]
+	}
+	return strings.Contains(tool, "context_build")
+}
+
+// spawnAllowed is the spawn gate's check for one spawn/subagent call.
+func (g *DelegationGuard) spawnAllowed(call *ToolCallHookRequest) bool {
+	task, _ := call.Arguments["task"].(string)
+	label, _ := call.Arguments["label"].(string)
+	if strings.HasPrefix(strings.TrimSpace(label), "probe-") {
+		return true
+	}
+	lines := strings.Split(strings.TrimRight(task, " \t\r\n"), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if !spawnTicketID.MatchString(task+" "+label) || !spawnBundleLine.MatchString(last) {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	t, ok := g.turns[call.Meta.TurnID]
+	if !ok || len(t.prompts) == 0 {
+		return true
+	}
+	// Exactly the built prompt; only trailing whitespace may differ.
+	want := strings.TrimRight(task, " \t\r\n")
+	for _, p := range t.prompts {
+		if strings.TrimRight(p, " \t\r\n") == want {
+			return true
+		}
+	}
+	return false
+}
+
+// builtPrompt takes the prompt out of a context_build result: the "prompt"
+// field of its JSON, or the text itself when it already ends in a bundle line.
+func builtPrompt(text string) string {
+	var out struct {
+		Prompt string `json:"prompt"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(text)), &out) == nil && out.Prompt != "" {
+		return out.Prompt
+	}
+	lines := strings.Split(strings.TrimRight(text, " \t\r\n"), "\n")
+	if spawnBundleLine.MatchString(strings.TrimSpace(lines[len(lines)-1])) {
+		return text
+	}
+	return ""
 }
 
 // asyncResultTurn reports a turn that PicoClaw started to deliver an async

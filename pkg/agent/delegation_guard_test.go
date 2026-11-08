@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 func TestDelegationGuardDeniesAfterBudget(t *testing.T) {
@@ -315,5 +316,54 @@ func TestDelegationGuardClaimCheck(t *testing.T) {
 	mustContinueAfterLLM(t, g, answer(HookMeta{TurnID: "t1"}, nil, claims[0]))
 	if fired != 0 {
 		t.Error("claim_check=false: fired")
+	}
+}
+
+func TestDelegationGuardSpawnGate(t *testing.T) {
+	ctx := context.Background()
+	prompt := "Task TI-7f3a: audit the heartbeat files.\nCriteria: ...\nbundle_id CB-0123456789 (pass this prompt unchanged)"
+	spawn := func(g *DelegationGuard, turn, task, label string) bool {
+		return tryTool(g, &ToolCallHookRequest{
+			Meta: HookMeta{TurnID: turn}, Tool: "spawn",
+			Arguments: map[string]any{"task": task, "label": label},
+		})
+	}
+	g := NewDelegationGuard(DelegationGuardConfig{SpawnRequiresContextBuild: true})
+	if spawn(g, "t1", "Inspect these paths and report back.", "heartbeat") {
+		t.Fatal("a hand-written brief must be refused")
+	}
+	_, d, _ := g.BeforeTool(ctx, &ToolCallHookRequest{
+		Meta: HookMeta{TurnID: "t1"}, Tool: "spawn",
+		Arguments: map[string]any{"task": "freestyle"},
+	})
+	if d.Reason != SpawnGateRefusal {
+		t.Fatalf("reason = %q", d.Reason)
+	}
+	if !spawn(g, "t1", "quick look at the logs", "probe-logs") {
+		t.Fatal("a probe- label is the escape hatch")
+	}
+	if !spawn(g, "t1", prompt, "audit") {
+		t.Fatal("markers without a recorded build should pass")
+	}
+	// Once context_build ran in the turn, only its prompt passes (trailing whitespace aside).
+	result, _ := json.Marshal(map[string]any{"bundle_id": "CB-0123456789", "prompt": prompt + "\n"})
+	if _, _, err := g.AfterTool(ctx, &ToolResultHookResponse{
+		Meta: HookMeta{TurnID: "t2"},
+		Tool: "context_builder_context_build", Result: &tools.ToolResult{ForLLM: string(result)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if spawn(g, "t2", strings.Replace(prompt, "audit", "AUDIT", 1), "audit") {
+		t.Fatal("an edited prompt must be refused")
+	}
+	if !spawn(g, "t2", prompt, "audit") {
+		t.Fatal("the exact built prompt must pass")
+	}
+	// Off by default, and spawn stays out of the direct-call budget either way.
+	g = NewDelegationGuard(DelegationGuardConfig{MaxDirectCalls: 1})
+	for i := 0; i < 3; i++ {
+		if !spawn(g, "t1", "anything", "") {
+			t.Fatal("gate off: spawn must pass")
+		}
 	}
 }
