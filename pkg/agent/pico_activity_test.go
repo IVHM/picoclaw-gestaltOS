@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -237,5 +240,117 @@ func TestPicoTurnRaw_CarriesTurnIDAndTokenTotals(t *testing.T) {
 	raw = picoTurnRaw(ts, nil)
 	if raw[metadataKeyTurnInputTokens] != "1200" || raw[metadataKeyTurnOutputTokens] != "50" {
 		t.Fatalf("raw = %#v", raw)
+	}
+}
+
+func TestSubTurnEndReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		ctxErr error
+		limit  string
+		want   string
+	}{
+		{"finished", nil, nil, "", ""},
+		{"iteration limit", nil, nil, SubTurnReasonMaxToolIterations, SubTurnReasonMaxToolIterations},
+		{"timeout error", fmt.Errorf("llm: %w", context.DeadlineExceeded), nil, "", SubTurnReasonTimeout},
+		{"timeout without error", nil, context.DeadlineExceeded, "", SubTurnReasonTimeout},
+		{"canceled is not a timeout", nil, context.Canceled, "", ""},
+		{"other error keeps its text", errors.New("boom"), nil, "", "boom"},
+	}
+	for _, tc := range cases {
+		if got := subTurnEndReason(tc.err, tc.ctxErr, tc.limit); got != tc.want {
+			t.Errorf("%s: reason = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// readSubTurnEnd returns the first subturn end frame published on msgBus.
+func readSubTurnEnd(t *testing.T, msgBus *bus.MessageBus) PicoSubTurn {
+	t.Helper()
+	for {
+		msg := readOutbound(t, msgBus)
+		if msg.Context.Raw[metadataKeyMessageKind] != messageKindSubTurn {
+			continue
+		}
+		var st PicoSubTurn
+		if err := json.Unmarshal([]byte(msg.Context.Raw[metadataKeySubTurn]), &st); err != nil {
+			t.Fatal(err)
+		}
+		if st.Phase == SubTurnPhaseEnd {
+			return st
+		}
+	}
+}
+
+func TestSpawnSubTurn_EndSaysWhenTheChildHitMaxToolIterations(t *testing.T) {
+	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+		Workspace: t.TempDir(), ModelName: "test-model", MaxTokens: 4096, MaxToolIterations: 2,
+	}}}
+	msgBus := bus.NewMessageBus()
+	al := NewAgentLoop(cfg, msgBus, &toolLimitOnlyProvider{})
+	al.RegisterTool(&toolLimitTestTool{})
+	parentTS := &turnState{
+		ctx: context.Background(), turnID: "turn-1", agentID: "main", channel: "pico",
+		chatID: "pico:session-1", sessionKey: "agent:main:pico:session-1",
+		opts:           processOptions{AllowInterimPicoPublish: true},
+		pendingResults: make(chan *tools.ToolResult, 4),
+		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		session:        &ephemeralSessionStore{}, agent: al.registry.GetDefaultAgent(),
+	}
+
+	if _, err := spawnSubTurn(context.Background(), al, parentTS, SubTurnConfig{Model: "test-model"}); err != nil {
+		t.Fatalf("spawnSubTurn() error = %v", err)
+	}
+	end := readSubTurnEnd(t, msgBus)
+	if end.Status != "completed" || end.Reason != SubTurnReasonMaxToolIterations {
+		t.Fatalf(
+			"end status = %q reason = %q, want completed / %s",
+			end.Status,
+			end.Reason,
+			SubTurnReasonMaxToolIterations,
+		)
+	}
+}
+
+type blockingUntilDoneProvider struct{}
+
+func (m *blockingUntilDoneProvider) Chat(
+	ctx context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (m *blockingUntilDoneProvider) GetDefaultModel() string { return "blocking-model" }
+
+func TestSpawnSubTurn_EndSaysWhenTheChildTimedOut(t *testing.T) {
+	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+		Workspace: t.TempDir(), ModelName: "test-model", MaxTokens: 4096, MaxToolIterations: 2,
+	}}}
+	msgBus := bus.NewMessageBus()
+	al := NewAgentLoop(cfg, msgBus, &blockingUntilDoneProvider{})
+	parentTS := &turnState{
+		ctx: context.Background(), turnID: "turn-1", agentID: "main", channel: "pico",
+		chatID: "pico:session-1", sessionKey: "agent:main:pico:session-1",
+		opts:           processOptions{AllowInterimPicoPublish: true},
+		pendingResults: make(chan *tools.ToolResult, 4),
+		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		session:        &ephemeralSessionStore{}, agent: al.registry.GetDefaultAgent(),
+	}
+
+	_, _ = spawnSubTurn(
+		context.Background(),
+		al,
+		parentTS,
+		SubTurnConfig{Model: "test-model", Timeout: 50 * time.Millisecond},
+	)
+	end := readSubTurnEnd(t, msgBus)
+	if end.Reason != SubTurnReasonTimeout {
+		t.Fatalf("end status = %q reason = %q, want reason %s", end.Status, end.Reason, SubTurnReasonTimeout)
 	}
 }

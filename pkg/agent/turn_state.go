@@ -253,6 +253,7 @@ type turnState struct {
 	tokenBudget      *atomic.Int64        // Shared token budget counter
 	lastFinishReason string               // Last LLM finish_reason
 	lastUsage        *providers.UsageInfo // Last LLM usage info
+	limitReason      string               // set when the turn stopped at a limit (e.g. max_tool_iterations)
 	promptTokens     int                  // Prompt tokens summed over this turn's LLM calls
 	completionTokens int                  // Completion tokens summed over this turn's LLM calls
 
@@ -898,6 +899,21 @@ func (ts *turnState) SetLastUsage(usage *providers.UsageInfo) {
 		ts.promptTokens += usage.PromptTokens
 		ts.completionTokens += usage.CompletionTokens
 	}
+}
+
+// setLimitReason records that the turn stopped at a limit instead of
+// finishing on its own.
+func (ts *turnState) setLimitReason(reason string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.limitReason = reason
+}
+
+// LimitReason is the limit the turn stopped at, or "" if it finished.
+func (ts *turnState) LimitReason() string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return ts.limitReason
 }
 
 // TokenTotals returns prompt and completion tokens summed over the turn.

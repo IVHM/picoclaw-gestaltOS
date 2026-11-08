@@ -273,6 +273,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	if finalContent == "" {
 		if ts.currentIteration() >= ts.agent.MaxIterations && ts.agent.MaxIterations > 0 {
 			finalContent = toolLimitResponse
+			ts.setLimitReason(SubTurnReasonMaxToolIterations)
 		} else {
 			finalContent = ts.opts.DefaultResponse
 		}

@@ -43,6 +43,13 @@ const (
 	SubTurnPhaseEnd             = "end"
 	SubTurnPhaseResultDelivered = "result_delivered"
 	SubTurnPhaseOrphan          = "orphan"
+
+	// SubTurnReasonMaxToolIterations is the end frame's reason when the child
+	// ran out of tool iterations instead of finishing.
+	SubTurnReasonMaxToolIterations = "max_tool_iterations"
+	// SubTurnReasonTimeout is the end frame's reason when the child's timeout
+	// expired. Other errors keep their error text.
+	SubTurnReasonTimeout = "timeout"
 )
 
 // PicoToolResult is the tool_result payload sent on the pico socket. It pairs
@@ -195,4 +202,17 @@ func picoTurnRaw(ts *turnState, extra map[string]string) map[string]string {
 		raw[metadataKeyTurnOutputTokens] = strconv.Itoa(out)
 	}
 	return raw
+}
+
+// subTurnEndReason explains why a child stopped: a limit it hit, a timeout,
+// the error text, or "" when it finished on its own.
+func subTurnEndReason(err, ctxErr error, limit string) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || (err == nil && errors.Is(ctxErr, context.DeadlineExceeded)):
+		return SubTurnReasonTimeout
+	case err != nil:
+		return err.Error()
+	default:
+		return limit
+	}
 }

@@ -519,9 +519,7 @@ func spawnSubTurn(
 			InputTokens:  promptTokens,
 			OutputTokens: completionTokens,
 		}
-		if err != nil {
-			endPayload.Reason = err.Error()
-		}
+		endPayload.Reason = subTurnEndReason(err, childCtx.Err(), childTS.LimitReason())
 		if result != nil {
 			endPayload.ResultLen = len([]rune(result.ForLLM))
 		}
