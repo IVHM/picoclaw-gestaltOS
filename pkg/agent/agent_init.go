@@ -381,6 +381,13 @@ func registerSharedTools(
 				subagentTool.SetSpawner(NewSubTurnSpawner(al))
 				agent.Tools.Register(subagentTool)
 			}
+			if dt := cfg.Tools.DelegateTask; dt.Enabled && dt.PrepareTool != "" && agentID != dt.AgentID {
+				// The worker itself does not get it, so a worker cannot delegate onward.
+				reg := agent.Tools
+				delegateTask := tools.NewDelegateTaskTool(subagentManager, reg.Get, dt.PrepareTool, dt.AgentID)
+				delegateTask.SetSpawner(NewSubTurnSpawner(al))
+				agent.Tools.Register(delegateTask)
+			}
 			if spawnStatusEnabled {
 				agent.Tools.Register(tools.NewSpawnStatusTool(subagentManager))
 			}

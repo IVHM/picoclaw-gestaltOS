@@ -40,7 +40,7 @@ type DelegationGuardConfig struct {
 	// ClaimCheck sends a top-level turn back once when its answer says it
 	// dispatched sub-agents but the turn made no spawn call.
 	ClaimCheck *bool `json:"claim_check"`
-	// SpawnRequiresContextBuild refuses spawn/subagent unless the task is a
+	// SpawnRequiresContextBuild refuses spawn/subagent/delegate unless the task is a
 	// context-builder prompt: a TI- ticket id and a last line "bundle_id CB-…",
 	// and, when this turn ran context_build, exactly the prompt it returned.
 	// A label starting "probe-" is let through. Off by default.
@@ -125,7 +125,7 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 		cfg.MaxDirectCalls = 2
 	}
 	if len(cfg.DelegateTools) == 0 {
-		cfg.DelegateTools = []string{"spawn", "spawn_status", "subagent"}
+		cfg.DelegateTools = []string{"spawn", "spawn_status", "subagent", "delegate", "delegate_task"}
 	}
 	g := &DelegationGuard{
 		claims:     cfg.ClaimCheck == nil || *cfg.ClaimCheck,
@@ -292,7 +292,8 @@ func (g *DelegationGuard) BeforeTool(
 	if call == nil {
 		return call, HookDecision{Action: HookActionContinue}, nil
 	}
-	if g.spawnGate && (call.Tool == "spawn" || call.Tool == "subagent") && !g.spawnAllowed(call) {
+	if g.spawnGate && (call.Tool == "spawn" || call.Tool == "subagent" || call.Tool == "delegate") &&
+		!g.spawnAllowed(call) {
 		return call, HookDecision{Action: HookActionDenyTool, Reason: SpawnGateRefusal}, nil
 	}
 	if !g.topLevel(call.Meta) {

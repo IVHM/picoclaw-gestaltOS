@@ -884,6 +884,16 @@ type ToolConfig struct {
 	Enabled bool `json:"enabled" yaml:"-" env:"ENABLED"`
 }
 
+// DelegateTaskConfig enables the delegate_task tool: a brief (problem,
+// resources, success criteria) is turned into a prompt by PrepareTool (a
+// registered tool name, e.g. an MCP tool "mcp_<server>_<tool>"), and AgentID
+// is spawned with exactly that prompt.
+type DelegateTaskConfig struct {
+	Enabled     bool   `json:"enabled"`
+	PrepareTool string `json:"prepare_tool,omitempty"`
+	AgentID     string `json:"agent_id,omitempty"`
+}
+
 type MessageToolsConfig struct {
 	ToolConfig `yaml:"-" envPrefix:"PICOCLAW_TOOLS_MESSAGE_"`
 
@@ -1137,6 +1147,7 @@ type ToolsConfig struct {
 	SendTTS         ToolConfig         `json:"send_tts"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
 	Spawn           ToolConfig         `json:"spawn"             yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
 	SpawnStatus     ToolConfig         `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
+	DelegateTask    DelegateTaskConfig `json:"delegate_task"     yaml:"-"`
 	SPI             ToolConfig         `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
 	Subagent        ToolConfig         `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
 	WebFetch        ToolConfig         `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`

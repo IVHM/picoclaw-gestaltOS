@@ -433,3 +433,40 @@ func TestHookManagerLetsHooksOnlyRemoveTools(t *testing.T) {
 		}
 	}
 }
+
+func TestDelegateTaskRegisteredForMainNotForWorker(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         root + "/main",
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 5,
+			},
+			List: []config.AgentConfig{
+				{
+					ID: "main", Default: true, Workspace: root + "/main",
+					Subagents: &config.SubagentsConfig{AllowAgents: []string{"worker"}},
+				},
+				{ID: "worker", Workspace: root + "/worker"},
+			},
+		},
+	}
+	cfg.Tools.Subagent.Enabled = true
+	cfg.Tools.Spawn.Enabled = true
+	cfg.Tools.DelegateTask = config.DelegateTaskConfig{
+		Enabled:     true,
+		PrepareTool: "mcp_bridge_delegate_prepare",
+		AgentID:     "worker",
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	main, _ := al.registry.GetAgent("main")
+	worker, _ := al.registry.GetAgent("worker")
+	if _, ok := main.Tools.Get("delegate_task"); !ok {
+		t.Fatal("main should have delegate_task")
+	}
+	if _, ok := worker.Tools.Get("delegate_task"); ok {
+		t.Fatal("the worker must not get delegate_task")
+	}
+}
