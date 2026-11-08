@@ -67,6 +67,9 @@ const (
 	// SubTurnReasonTimeout is the end frame's reason when the child's timeout
 	// expired. Other errors keep their error text.
 	SubTurnReasonTimeout = "timeout"
+	// SubTurnReasonTokenBudget is the end frame's reason when the child used up
+	// its token budget and was asked for a final answer.
+	SubTurnReasonTokenBudget = "token_budget"
 )
 
 // PicoToolResult is the tool_result payload sent on the pico socket. It pairs

@@ -472,3 +472,60 @@ func newSubTurnMessageTestLoop(t *testing.T) (*AgentLoop, *bus.MessageBus) {
 	t.Cleanup(cleanup)
 	return al, msgBus
 }
+
+// budgetBurnProvider asks for a tool every call and reports 600 tokens per call.
+type budgetBurnProvider struct{ calls int }
+
+func (p *budgetBurnProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	tools []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	usage := &providers.UsageInfo{PromptTokens: 500, CompletionTokens: 100}
+	if len(tools) == 0 {
+		return &providers.LLMResponse{Content: "partial answer", Usage: usage}, nil
+	}
+	return &providers.LLMResponse{
+		ToolCalls: []providers.ToolCall{{
+			ID: fmt.Sprintf("call_%d", p.calls), Type: "function", Name: "tool_limit_test_tool",
+			Arguments: map[string]any{"value": "x"},
+		}},
+		Usage: usage,
+	}, nil
+}
+
+func (p *budgetBurnProvider) GetDefaultModel() string { return "budget-burn-model" }
+
+func TestSpawnSubTurn_EndSaysWhenTheChildUsedUpItsTokenBudget(t *testing.T) {
+	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+		Workspace: t.TempDir(), ModelName: "test-model", MaxTokens: 4096, MaxToolIterations: 10,
+		SubTurn: config.SubTurnConfig{DefaultTokenBudget: 1000},
+	}}}
+	msgBus := bus.NewMessageBus()
+	provider := &budgetBurnProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	al.RegisterTool(&toolLimitTestTool{})
+	parentTS := &turnState{
+		ctx: context.Background(), turnID: "turn-1", agentID: "main", channel: "pico",
+		chatID: "pico:session-1", sessionKey: "agent:main:pico:session-1",
+		opts:           processOptions{AllowInterimPicoPublish: true},
+		pendingResults: make(chan *tools.ToolResult, 4),
+		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		session:        &ephemeralSessionStore{}, agent: al.registry.GetDefaultAgent(),
+	}
+
+	if _, err := spawnSubTurn(context.Background(), al, parentTS, SubTurnConfig{Model: "test-model"}); err != nil {
+		t.Fatalf("spawnSubTurn() error = %v", err)
+	}
+	end := readSubTurnEnd(t, msgBus)
+	if end.Reason != SubTurnReasonTokenBudget || end.Status != "completed" {
+		t.Fatalf("end status = %q reason = %q, want completed / %s", end.Status, end.Reason, SubTurnReasonTokenBudget)
+	}
+	// 600 tokens per call against 1000: two calls with tools, then one last call without them.
+	if provider.calls != 3 {
+		t.Fatalf("model calls = %d, want 3", provider.calls)
+	}
+}

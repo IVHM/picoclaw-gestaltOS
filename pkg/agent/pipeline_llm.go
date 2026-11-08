@@ -542,6 +542,7 @@ func (p *Pipeline) CallLLM(
 		ts.SetLastFinishReason(exec.response.FinishReason)
 		if exec.response.Usage != nil {
 			ts.SetLastUsage(exec.response.Usage)
+			ts.spendTokenBudget(exec.response.Usage)
 		}
 	}
 

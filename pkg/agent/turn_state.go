@@ -911,6 +911,23 @@ func (ts *turnState) setLimitReason(reason string) {
 	ts.limitReason = reason
 }
 
+// spendTokenBudget takes one LLM call's tokens off a sub-turn's token budget
+// (agents.defaults.subturn.default_token_budget, or a team budget). When it
+// runs out, the turn gets one last call without tools to answer, and its end
+// frame says token_budget.
+func (ts *turnState) spendTokenBudget(usage *providers.UsageInfo) {
+	if ts.tokenBudget == nil || usage == nil || ts.parentTurnID == "" {
+		return
+	}
+	if ts.tokenBudget.Add(-int64(usage.PromptTokens+usage.CompletionTokens)) > 0 {
+		return
+	}
+	if ts.LimitReason() == "" {
+		ts.setLimitReason(SubTurnReasonTokenBudget)
+	}
+	ts.requestGracefulInterrupt("Your token budget for this task is used up. Give your answer now with what you have.")
+}
+
 // nextSubTurnMessageSeq numbers this child's subturn.message frames from 1.
 func (ts *turnState) nextSubTurnMessageSeq() int {
 	ts.mu.Lock()
