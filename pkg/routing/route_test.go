@@ -231,3 +231,49 @@ func TestResolveRoute_NoDefaultUsesFirst(t *testing.T) {
 		t.Errorf("AgentID = %q, want 'alpha' (first in list)", route.AgentID)
 	}
 }
+
+func TestResolveRoute_DispatchChatPrefix(t *testing.T) {
+	cfg := testConfig([]config.AgentConfig{
+		{ID: "main", Default: true},
+		{ID: "assistant"},
+	})
+	cfg.Agents.Dispatch = &config.DispatchConfig{
+		Rules: []config.DispatchRule{{
+			Name:  "project-assistants",
+			Agent: "assistant",
+			When:  config.DispatchSelector{Channel: "pico", Chat: "direct:pico:assist-*"},
+		}},
+	}
+	r := NewRouteResolver(cfg)
+
+	for chat, want := range map[string]string{
+		"pico:assist-web-alpha": "assistant",
+		"pico:Assist-X":         "assistant",
+		"pico:proj-web-alpha":   "main",
+		"pico:assist":           "main",
+	} {
+		route := r.ResolveRoute(bus.InboundContext{Channel: "pico", ChatID: chat, ChatType: "direct", SenderID: "pico-user"})
+		if route.AgentID != want {
+			t.Errorf("chat %q: AgentID = %q, want %q", chat, route.AgentID, want)
+		}
+	}
+}
+
+func TestSelectorValueMatches(t *testing.T) {
+	cases := []struct {
+		want, got string
+		ok        bool
+	}{
+		{"direct:pico:a", "direct:pico:a", true},
+		{"direct:pico:a", "direct:pico:ab", false},
+		{"direct:pico:a*", "direct:pico:ab", true},
+		{"direct:pico:a*", "direct:pico:a", true},
+		{"*", "anything", true},
+		{"direct:pico:a*", "group:pico:ab", false},
+	}
+	for _, c := range cases {
+		if got := selectorValueMatches(c.want, c.got); got != c.ok {
+			t.Errorf("selectorValueMatches(%q, %q) = %v, want %v", c.want, c.got, got, c.ok)
+		}
+	}
+}

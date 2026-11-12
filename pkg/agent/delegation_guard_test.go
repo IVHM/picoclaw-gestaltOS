@@ -470,3 +470,45 @@ func TestDelegateTaskRegisteredForMainNotForWorker(t *testing.T) {
 		t.Fatal("the worker must not get delegate_task")
 	}
 }
+
+func TestDelegationGuardNoDelegateAgents(t *testing.T) {
+	g := NewDelegationGuard(DelegationGuardConfig{MaxDirectCalls: 1, NoDelegateAgents: []string{"Assistant"}})
+	ctx := context.Background()
+	meta := HookMeta{TurnID: "t1", AgentID: "assistant", SessionKey: "s1"}
+	call := func(m HookMeta, tool string) HookAction {
+		_, d, _ := g.BeforeTool(ctx, &ToolCallHookRequest{Meta: m, Tool: tool})
+		return d.normalizedAction()
+	}
+	for i := 0; i < 4; i++ {
+		if call(meta, "mcp_tickets_project_show") != HookActionContinue {
+			t.Fatal("a no-delegate agent has no direct budget")
+		}
+	}
+	for _, tool := range []string{"spawn", "delegate_task", "subagent"} {
+		if call(meta, tool) != HookActionDenyTool {
+			t.Fatalf("%s should be denied to a no-delegate agent", tool)
+		}
+	}
+	tool := func(name string) providers.ToolDefinition {
+		return providers.ToolDefinition{Type: "function", Function: providers.ToolFunctionDefinition{Name: name}}
+	}
+	req, d, _ := g.BeforeLLM(ctx, &LLMHookRequest{Meta: meta, Tools: []providers.ToolDefinition{tool("read_file"), tool("spawn")}})
+	if d.Action != HookActionModify || len(req.Tools) != 1 || req.Tools[0].Function.Name != "read_file" {
+		t.Fatalf("delegating tools should be removed, got %+v", req.Tools)
+	}
+	if len(req.Messages) != 0 {
+		t.Fatal("a no-delegate agent gets no budget note")
+	}
+	steered := 0
+	g.steer = func(string, string, providers.Message) error { steered++; return nil }
+	mustContinueAfterLLM(t, g, &LLMHookResponse{Meta: meta, Response: &providers.LLMResponse{Content: "I spawned two sub-agents."}})
+	if steered != 0 {
+		t.Fatal("no gates for a no-delegate agent")
+	}
+	// The main agent keeps its budget.
+	main := HookMeta{TurnID: "t2", AgentID: "main"}
+	call(main, "read_file")
+	if call(main, "read_file") != HookActionDenyTool {
+		t.Fatal("the main agent's budget still applies")
+	}
+}

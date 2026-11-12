@@ -183,16 +183,16 @@ func ruleMatchesView(rule config.DispatchRule, view dispatchView) bool {
 	if when.Account != "" && when.Account != view.Account {
 		return false
 	}
-	if when.Space != "" && when.Space != view.Space {
+	if when.Space != "" && !selectorValueMatches(when.Space, view.Space) {
 		return false
 	}
-	if when.Chat != "" && when.Chat != view.Chat {
+	if when.Chat != "" && !selectorValueMatches(when.Chat, view.Chat) {
 		return false
 	}
-	if when.Topic != "" && when.Topic != view.Topic {
+	if when.Topic != "" && !selectorValueMatches(when.Topic, view.Topic) {
 		return false
 	}
-	if when.Sender != "" && when.Sender != view.Sender {
+	if when.Sender != "" && !selectorValueMatches(when.Sender, view.Sender) {
 		return false
 	}
 	if when.Mentioned != nil && *when.Mentioned != view.Mentioned {
@@ -242,6 +242,16 @@ func buildDispatchView(inbound bus.InboundContext, identityLinks map[string][]st
 	view.Sender = canonicalDispatchSenderID(inbound.Channel, inbound.SenderID, identityLinks)
 
 	return view
+}
+
+// selectorValueMatches compares one selector value with the message's value. A value ending in
+// "*" matches every value that starts with the part before it, so one rule can cover a family of
+// chats (for example "direct:pico:assist-*" for every Pico session whose id starts "assist-").
+func selectorValueMatches(want, got string) bool {
+	if prefix, ok := strings.CutSuffix(want, "*"); ok {
+		return strings.HasPrefix(got, prefix)
+	}
+	return want == got
 }
 
 func normalizeDispatchSelector(selector config.DispatchSelector) config.DispatchSelector {

@@ -52,6 +52,10 @@ type DelegationGuardConfig struct {
 	// write_file), so delegating is the easy path. Sub-agents keep them.
 	// Empty by default.
 	HideFromMain []string `json:"hide_from_main"`
+	// NoDelegateAgents are agents that never delegate, such as a project assistant that only
+	// talks with the user and drafts plans. Their turns get no budget, reminder or gates, and
+	// the delegating tools are removed from their tool list and denied. Empty by default.
+	NoDelegateAgents []string `json:"no_delegate_agents"`
 }
 
 // DelegationGuard keeps top-level turns to a small direct tool budget so that
@@ -66,6 +70,7 @@ type DelegationGuard struct {
 	spawnGate  bool
 	buildTools map[string]bool
 	hidden     map[string]bool
+	noDelegate map[string]bool
 
 	mu    sync.Mutex
 	turns map[string]*delegationTurn
@@ -132,6 +137,7 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 		spawnGate:  cfg.SpawnRequiresContextBuild,
 		buildTools: map[string]bool{},
 		hidden:     map[string]bool{},
+		noDelegate: map[string]bool{},
 		max:        cfg.MaxDirectCalls,
 		delegate:   map[string]bool{},
 		remind:     cfg.Remind == nil || *cfg.Remind,
@@ -144,6 +150,11 @@ func NewDelegationGuard(cfg DelegationGuardConfig) *DelegationGuard {
 	}
 	for _, name := range cfg.ContextBuildTools {
 		g.buildTools[name] = true
+	}
+	for _, id := range cfg.NoDelegateAgents {
+		if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
+			g.noDelegate[id] = true
+		}
 	}
 	for _, name := range cfg.HideFromMain {
 		if !g.delegate[name] {
@@ -162,7 +173,12 @@ func (g *DelegationGuard) bindAgentLoop(al *AgentLoop) {
 }
 
 func (g *DelegationGuard) topLevel(meta HookMeta) bool {
-	return meta.ParentTurnID == "" && meta.TurnID != ""
+	return meta.ParentTurnID == "" && meta.TurnID != "" && !g.isNoDelegate(meta)
+}
+
+// isNoDelegate reports whether the turn belongs to an agent listed in no_delegate_agents.
+func (g *DelegationGuard) isNoDelegate(meta HookMeta) bool {
+	return len(g.noDelegate) > 0 && g.noDelegate[strings.ToLower(strings.TrimSpace(meta.AgentID))]
 }
 
 // turn returns the state of a turn, creating it. Callers hold g.mu.
@@ -190,6 +206,19 @@ func (g *DelegationGuard) BeforeLLM(_ context.Context, req *LLMHookRequest) (*LL
 			return req, HookDecision{Action: HookActionContinue}, nil
 		}
 		req.Messages = append(req.Messages, providers.Message{Role: "user", Content: g.subNote})
+		return req, HookDecision{Action: HookActionModify}, nil
+	}
+	if g.isNoDelegate(req.Meta) {
+		kept := req.Tools[:0:0]
+		for _, def := range req.Tools {
+			if !g.delegate[def.Function.Name] {
+				kept = append(kept, def)
+			}
+		}
+		if len(kept) == len(req.Tools) {
+			return req, HookDecision{Action: HookActionContinue}, nil
+		}
+		req.Tools = kept
 		return req, HookDecision{Action: HookActionModify}, nil
 	}
 	if !g.topLevel(req.Meta) {
@@ -291,6 +320,10 @@ func (g *DelegationGuard) BeforeTool(
 ) (*ToolCallHookRequest, HookDecision, error) {
 	if call == nil {
 		return call, HookDecision{Action: HookActionContinue}, nil
+	}
+	if g.isNoDelegate(call.Meta) && call.Meta.ParentTurnID == "" && g.delegate[call.Tool] {
+		return call, HookDecision{Action: HookActionDenyTool, Reason: fmt.Sprintf(
+			"%s is not available to this agent; it plans and reports, the project's orchestrator session does the work", call.Tool)}, nil
 	}
 	if g.spawnGate && (call.Tool == "spawn" || call.Tool == "subagent" || call.Tool == "delegate") &&
 		!g.spawnAllowed(call) {
