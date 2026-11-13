@@ -455,6 +455,10 @@ func (al *AgentLoop) askSideQuestion(
 		"temperature":      agent.Temperature,
 		"prompt_cache_key": agent.ID + ":btw",
 	}
+	if opts != nil && strings.TrimSpace(opts.SessionKey) != "" {
+		llmOpts["gestalt_session"] = opts.SessionKey
+	}
+	llmOpts["gestalt_agent"] = agent.ID
 
 	hookModelChanged := false
 	sideSuppressReasoning := false
@@ -522,6 +526,13 @@ func (al *AgentLoop) askSideQuestion(
 				messages = llmReq.Messages
 				llmOpts = llmReq.Options
 				delete(llmOpts, "native_search")
+				if llmOpts == nil {
+					llmOpts = make(map[string]any)
+				}
+				if opts != nil && strings.TrimSpace(opts.SessionKey) != "" {
+					llmOpts["gestalt_session"] = opts.SessionKey
+				}
+				llmOpts["gestalt_agent"] = agent.ID
 			}
 		case HookActionAbortTurn:
 			reason := decision.Reason

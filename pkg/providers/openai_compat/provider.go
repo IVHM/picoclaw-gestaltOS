@@ -332,6 +332,40 @@ func (p *Provider) applyCustomHeaders(req *http.Request) {
 	}
 }
 
+const (
+	gestaltSessionOpt        = "gestalt_session"
+	gestaltAgentOpt          = "gestalt_agent"
+	litellmSpendMetaHeader   = "x-litellm-spend-logs-metadata"
+)
+
+// applyGestaltSpendMetadata sets LiteLLM spend-log tags from per-request options.
+// custom_headers is static at provider construction, so session/agent must be
+// attached here on every Chat / ChatStream call.
+func applyGestaltSpendMetadata(req *http.Request, options map[string]any) {
+	if req == nil || len(options) == 0 {
+		return
+	}
+	session, _ := options[gestaltSessionOpt].(string)
+	agent, _ := options[gestaltAgentOpt].(string)
+	session = strings.TrimSpace(session)
+	agent = strings.TrimSpace(agent)
+	if session == "" && agent == "" {
+		return
+	}
+	meta := map[string]string{}
+	if session != "" {
+		meta["gestalt_session"] = session
+	}
+	if agent != "" {
+		meta["gestalt_agent"] = agent
+	}
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return
+	}
+	req.Header.Set(litellmSpendMetaHeader, string(raw))
+}
+
 func (p *Provider) SetProviderName(providerName string) {
 	p.providerName = strings.ToLower(strings.TrimSpace(providerName))
 }
@@ -488,6 +522,7 @@ func (p *Provider) Chat(
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 	p.applyCustomHeaders(req)
+	applyGestaltSpendMetadata(req, options)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -560,6 +595,7 @@ func (p *Provider) ChatStreamEvents(
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 	p.applyCustomHeaders(req)
+	applyGestaltSpendMetadata(req, options)
 
 	// Use a client without Timeout for streaming — the http.Client.Timeout covers
 	// the entire request lifecycle including body reads, which would kill long streams.

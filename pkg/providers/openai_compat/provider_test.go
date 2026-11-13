@@ -2,6 +2,7 @@ package openai_compat
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -2194,5 +2195,54 @@ func TestSerializeMessages_StripsSystemParts(t *testing.T) {
 	raw := string(data)
 	if strings.Contains(raw, "system_parts") {
 		t.Fatal("system_parts should not appear in serialized output")
+	}
+}
+
+func TestApplyGestaltSpendMetadataHeader(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "http://example/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyGestaltSpendMetadata(req, map[string]any{
+		"gestalt_session": "pico:proj-web-alpha",
+		"gestalt_agent":   "main",
+		"max_tokens":      32,
+	})
+	got := req.Header.Get("x-litellm-spend-logs-metadata")
+	if got == "" {
+		t.Fatal("expected spend metadata header")
+	}
+	var meta map[string]string
+	if err := json.Unmarshal([]byte(got), &meta); err != nil {
+		t.Fatalf("header json: %v (%q)", err, got)
+	}
+	if meta["gestalt_session"] != "pico:proj-web-alpha" || meta["gestalt_agent"] != "main" {
+		t.Fatalf("meta = %#v", meta)
+	}
+}
+
+func TestChatSetsGestaltSpendMetadataHeader(t *testing.T) {
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("x-litellm-spend-logs-metadata")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider("sk-test", server.URL, "")
+	_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, "flash-next", map[string]any{
+		"gestalt_session": "direct:pico:assist-linux",
+		"gestalt_agent":   "assistant",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]string
+	if err := json.Unmarshal([]byte(got), &meta); err != nil {
+		t.Fatalf("header %q: %v", got, err)
+	}
+	if meta["gestalt_session"] != "direct:pico:assist-linux" || meta["gestalt_agent"] != "assistant" {
+		t.Fatalf("meta = %#v", meta)
 	}
 }

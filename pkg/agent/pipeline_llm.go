@@ -78,6 +78,12 @@ func (p *Pipeline) CallLLM(
 	}
 	applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
 
+	if exec.llmOpts == nil {
+		exec.llmOpts = make(map[string]any)
+	}
+	exec.llmOpts["gestalt_session"] = ts.sessionKey
+	exec.llmOpts["gestalt_agent"] = ts.agent.ID
+
 	exec.llmModel = exec.activeModel
 	nativeSearchBeforeHook := exec.useNativeSearch
 
@@ -100,6 +106,11 @@ func (p *Pipeline) CallLLM(
 				exec.callMessages = llmReq.Messages
 				exec.providerToolDefs = filterToolsByTurnProfile(llmReq.Tools, ts.profile)
 				exec.llmOpts = llmReq.Options
+				if exec.llmOpts == nil {
+					exec.llmOpts = make(map[string]any)
+				}
+				exec.llmOpts["gestalt_session"] = ts.sessionKey
+				exec.llmOpts["gestalt_agent"] = ts.agent.ID
 				if strings.TrimSpace(exec.llmModel) != "" && exec.llmModel != prevModel {
 					if err := p.applyBeforeLLMModelRewrite(ts, exec); err != nil {
 						return ControlBreak, err
